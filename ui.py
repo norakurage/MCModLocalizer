@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import tempfile
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 import flet as ft
 
-from processing import ExtractionResult, translate_localizations, extract_localizations
+from processing import ExtractionResult, extract_localizations, translate_localizations
 
 APP_NAME = "MC Localizer"
+BASE_DIR = Path(__file__).resolve().parent
+RESOURCE_TEMPLATE_DIR = BASE_DIR / "a"
 
 try:
     import keyring  # type: ignore
@@ -21,16 +27,13 @@ class LocalizeApp:
     def __init__(self, page: ft.Page):
         self.page = page
         self.stop_event = threading.Event()
-        self.worker: threading.Thread | None = None
         # 保存キー
         self.K_API = "openai_api_key"
         self.K_MODEL = "openai_model"
         self.K_GLOSS = "glossary_path"
         self.K_SAVE_MODE = "save_mode"  # "keyring" or "local"
         self.K_DIR_JAR = "dir_mod_jar"
-        self.K_DIR_EXTRACT = "dir_extract_root"
-        self.K_DIR_INPUT = "dir_input_json"
-        self.K_DIR_OUTPUT = "dir_output_json"
+        self.K_DIR_OUTPUT = "dir_output_pack"
         self.K_DIR_GLOSSARY = "dir_glossary_csv"
         # 既定値
         self.default_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -47,50 +50,28 @@ class LocalizeApp:
         self.counter = ft.Text("待機中")
         # -------- 抽出タブ UI --------
         self.mod_jar_path = ft.TextField(label="Mod JAR（必須）", dense=True, expand=True)
-        self.extract_dir = ft.TextField(label="作業フォルダ（en_us.json / skeleton 出力先）", dense=True, expand=True)
-        self.cb_auto_translate = ft.Checkbox(label="抽出後すぐ翻訳（ja_jp.json を作成）", value=True)
+        self.output_dir = ft.TextField(label="出力フォルダ（リソースパック保存先）", dense=True, expand=True)
+        self.glossary_path = ft.TextField(label="用語集 CSV（任意）", dense=True, expand=True)
         self.fp_jar = ft.FilePicker(on_result=self._on_pick_jar)
         self.fp_dir = ft.FilePicker(on_result=self._on_pick_dir)
-        self.page.overlay.extend([self.fp_jar, self.fp_dir])
+        self.fp_gloss = ft.FilePicker(on_result=self._on_pick_glossary)
+        self.page.overlay.extend([self.fp_jar, self.fp_dir, self.fp_gloss])
         pick_jar_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="Mod JAR を選択",
                                      on_click=self._open_jar_picker)
-        pick_dir_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="作業フォルダを選択",
-                                     on_click=self._open_extract_dir_picker)
-        self.btn_extract = ft.ElevatedButton("抽出 / ひな形生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
-        extract_tab = ft.Column(
-            controls=[
-                ft.Text("ステップ1: JAR から en_us.json を抽出し、ひな形 (ja_jp.skeleton.json) を作成します。", weight=ft.FontWeight.BOLD),
-                ft.Row([self.mod_jar_path, pick_jar_btn], alignment=ft.MainAxisAlignment.START),
-                ft.Row([self.extract_dir, pick_dir_btn], alignment=ft.MainAxisAlignment.START),
-                ft.Row([self.cb_auto_translate, self.btn_extract, self.progress, self.counter], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                self.log,
-            ],
-            expand=True,
-            spacing=12,
-        )
-        # -------- 翻訳タブ UI --------
-        self.input_path = ft.TextField(label="入力 en_us.json（抽出済み）", dense=True, expand=True)
-        self.output_path = ft.TextField(label="出力 ja_jp.json", dense=True, expand=True)
-        self.glossary_path = ft.TextField(label="用語集 CSV（任意）", dense=True, expand=True)
-        self.fp_open = ft.FilePicker(on_result=self._on_pick_input)
-        self.fp_save = ft.FilePicker(on_result=self._on_save_output)
-        self.fp_gloss = ft.FilePicker(on_result=self._on_pick_glossary)
-        self.page.overlay.extend([self.fp_open, self.fp_save, self.fp_gloss])
-        pick_in_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="en_us.json を選択",
-                                    on_click=self._open_input_picker)
-        pick_out_btn = ft.IconButton(icon=ft.Icons.SAVE, tooltip="ja_jp.json の保存先",
-                                     on_click=self._open_output_picker)
+        pick_dir_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="出力フォルダを選択",
+                                     on_click=self._open_output_dir_picker)
         pick_gloss_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="用語集 CSV を選択",
                                        on_click=self._open_glossary_picker)
-        self.btn_start = ft.ElevatedButton("翻訳開始", icon=ft.Icons.PLAY_ARROW, on_click=self.on_start)
+        self.btn_extract = ft.ElevatedButton("抽出 / ja_jp 生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
         self.btn_stop = ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=self.on_stop, disabled=True)
-        translate_tab = ft.Column(
+        extract_tab = ft.Column(
             controls=[
-                ft.Text("ステップ2: en_us.json を OpenAI で翻訳し、ja_jp.json を生成します。", weight=ft.FontWeight.BOLD),
-                ft.Row([self.input_path, pick_in_btn], alignment=ft.MainAxisAlignment.START),
-                ft.Row([self.output_path, pick_out_btn], alignment=ft.MainAxisAlignment.START),
+                ft.Text("ステップ: JAR から en_us.json を抽出し、ja_jp.json まで自動生成します。", weight=ft.FontWeight.BOLD),
+                ft.Row([self.mod_jar_path, pick_jar_btn], alignment=ft.MainAxisAlignment.START),
+                ft.Row([self.output_dir, pick_dir_btn], alignment=ft.MainAxisAlignment.START),
                 ft.Row([self.glossary_path, pick_gloss_btn], alignment=ft.MainAxisAlignment.START),
-                ft.Row([self.btn_start, self.btn_stop], spacing=12),
+                ft.Row([self.btn_extract, self.btn_stop, self.progress, self.counter], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self.log,
             ],
             expand=True,
             spacing=12,
@@ -135,13 +116,12 @@ class LocalizeApp:
             selected_index=0,
             tabs=[
                 ft.Tab(text="抽出", icon=ft.Icons.DOWNLOAD, content=extract_tab),
-                ft.Tab(text="翻訳", icon=ft.Icons.TRANSLATE, content=translate_tab),
                 ft.Tab(text="設定", icon=ft.Icons.SETTINGS, content=settings_tab),
             ],
             expand=True,
         )
         page.add(self.tabs)
-        self._append_log("準備完了。JAR を抽出 → ひな形生成 → 翻訳の順で実行してください。")
+        self._append_log("準備完了。JAR と出力フォルダを指定して抽出を実行すると ja_jp.json とリソースパックを自動生成します。")
 
     # ------------------------------
     # FilePicker launchers
@@ -150,19 +130,9 @@ class LocalizeApp:
         init_dir = self._get_initial_directory(self.K_DIR_JAR)
         self.fp_jar.pick_files(initial_directory=init_dir, allowed_extensions=["jar"], allow_multiple=False)
 
-    def _open_extract_dir_picker(self, e: ft.ControlEvent):
-        init_dir = self._get_initial_directory(self.K_DIR_EXTRACT)
-        self.fp_dir.get_directory_path(initial_directory=init_dir)
-
-    def _open_input_picker(self, e: ft.ControlEvent):
-        init_dir = self._get_initial_directory(self.K_DIR_INPUT)
-        self.fp_open.pick_files(initial_directory=init_dir, allowed_extensions=["json"], allow_multiple=False)
-
-    def _open_output_picker(self, e: ft.ControlEvent):
+    def _open_output_dir_picker(self, e: ft.ControlEvent):
         init_dir = self._get_initial_directory(self.K_DIR_OUTPUT)
-        current = (self.output_path.value or "").strip()
-        file_name = Path(current).name if current else "ja_jp.json"
-        self.fp_save.save_file(initial_directory=init_dir, file_name=file_name)
+        self.fp_dir.get_directory_path(initial_directory=init_dir)
 
     def _open_glossary_picker(self, e: ft.ControlEvent):
         init_dir = self._get_initial_directory(self.K_DIR_GLOSSARY)
@@ -181,22 +151,8 @@ class LocalizeApp:
     def _on_pick_dir(self, e: ft.FilePickerResultEvent):
         if e.path:
             selected = Path(e.path)
-            self.extract_dir.value = str(selected)
-            self.extract_dir.update()
-            self._remember_dir(self.K_DIR_EXTRACT, selected)
-
-    def _on_pick_input(self, e: ft.FilePickerResultEvent):
-        if e.files:
-            selected = Path(e.files[0].path)
-            self.input_path.value = str(selected)
-            self.input_path.update()
-            self._remember_dir(self.K_DIR_INPUT, selected)
-
-    def _on_save_output(self, e: ft.FilePickerResultEvent):
-        if e.path:
-            selected = Path(e.path)
-            self.output_path.value = str(selected)
-            self.output_path.update()
+            self.output_dir.value = str(selected)
+            self.output_dir.update()
             self._remember_dir(self.K_DIR_OUTPUT, selected)
 
     def _on_pick_glossary(self, e: ft.FilePickerResultEvent):
@@ -293,120 +249,221 @@ class LocalizeApp:
     # 抽出フロー
     # ------------------------------
     def on_extract(self, e: ft.ControlEvent):
-        jar_path = Path(self.mod_jar_path.value.strip())
-        out_dir_value = self.extract_dir.value.strip()
+        jar_path_value = self.mod_jar_path.value.strip()
+        jar_path = Path(jar_path_value) if jar_path_value else None
+        out_dir_value = self.output_dir.value.strip()
         out_dir = Path(out_dir_value) if out_dir_value else None
-        if not jar_path.exists():
-            self._append_log(f"[ERROR] Mod JAR が見つかりません: {jar_path}")
+        gloss_path_value = self.glossary_path.value.strip()
+        gloss_path = Path(gloss_path_value) if gloss_path_value else None
+        if not jar_path or not jar_path.exists():
+            display = jar_path if jar_path else "(未指定)"
+            self._append_log(f"[ERROR] Mod JAR が見つかりません: {display}")
             return
         if out_dir is None:
-            self._append_log("[ERROR] 作業フォルダを指定してください。")
+            self._append_log("[ERROR] 出力フォルダを指定してください。")
             return
+        if not out_dir.exists():
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                self._append_log(f"[INFO] 出力フォルダを作成しました: {out_dir}")
+            except Exception as ex:
+                self._append_log(f"[ERROR] 出力フォルダを作成できません: {repr(ex)}")
+                return
+        self._remember_dir(self.K_DIR_JAR, jar_path)
+        self._remember_dir(self.K_DIR_OUTPUT, out_dir)
+        if gloss_path:
+            self._remember_dir(self.K_DIR_GLOSSARY, gloss_path)
         self.btn_extract.disabled = True
         self.btn_extract.update()
-        self._set_progress(0, "抽出開始")
+        self._set_progress(0.0, "抽出開始")
 
         def _work():
+            temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+            temp_dir_path: Path | None = None
             try:
+                temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
+                temp_dir_path = Path(temp_dir_obj.name)
+                self._append_log(f"[INFO] 一時作業フォルダ: {temp_dir_path}")
                 self._append_log(f"[RUN] 抽出: {jar_path}")
                 result: ExtractionResult = extract_localizations(
                     jar_path,
-                    out_dir,
+                    temp_dir_path,
                     log=self._append_log,
                     progress=self._set_progress,
                 )
-                if self.cb_auto_translate.value and result.primary_en_path:
-                    self.input_path.value = str(result.primary_en_path)
-                    out_path = result.primary_en_path.parent / "ja_jp.json"
-                    self.output_path.value = str(out_path)
-                    self.input_path.update()
-                    self.output_path.update()
-                    self.tabs.selected_index = 1
-                    self.tabs.update()
+                targets: list[tuple[str, Path]] = []
+                for modid in result.mod_maps.keys():
+                    en_path = temp_dir_path / modid / "en_us.json"
+                    if en_path.exists():
+                        targets.append((modid, en_path))
+                if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
-                    self._start_translate_internal()
+                    self._translate_targets(targets, gloss_path, jar_path, temp_dir_path, out_dir)
                 else:
                     self._set_progress(1.0, "抽出完了")
+                    self._append_log("[WARN] 翻訳対象となる en_us.json が見つかりませんでした。")
             except Exception as ex:
                 self._append_log("[ERROR] 抽出処理で例外: " + repr(ex))
                 self._append_log(traceback.format_exc())
             finally:
+                if temp_dir_obj:
+                    temp_dir_obj.cleanup()
+                    if temp_dir_path:
+                        self._append_log(f"[INFO] 一時作業フォルダを削除しました: {temp_dir_path}")
                 self.btn_extract.disabled = False
                 self.btn_extract.update()
 
         threading.Thread(target=_work, daemon=True).start()
 
-    # ------------------------------
-    # 翻訳フロー
-    # ------------------------------
-    def on_start(self, e: ft.ControlEvent):
-        self._start_translate_internal()
-
-    def _start_translate_internal(self):
-        if self.worker and self.worker.is_alive():
-            self._append_log("[WARN] すでに実行中です。停止後に再度お試しください。")
-            return
-        in_path_value = self.input_path.value.strip()
-        out_path_value = self.output_path.value.strip()
-        gloss_path_value = self.glossary_path.value.strip()
-        if not in_path_value:
-            self._append_log("[ERROR] 入力 en_us.json を指定してください。")
-            return
-        in_path = Path(in_path_value)
-        out_path = Path(out_path_value) if out_path_value else None
-        gloss_path = Path(gloss_path_value) if gloss_path_value else None
-        model = (self._load_value(self.K_MODEL) or self.default_model)
+    def _translate_targets(
+        self,
+        targets: list[tuple[str, Path]],
+        gloss_path: Path | None,
+        jar_path: Path,
+        temp_dir: Path,
+        output_dir: Path,
+    ):
         api_key = self._load_api_key()
         if not api_key:
             self._append_log("[ERROR] API キーが未設定です。設定タブで保存してください。")
-            self.tabs.selected_index = 2
+            self.tabs.selected_index = 1
             self.tabs.update()
             return
-        if not in_path.exists():
-            self._append_log(f"[ERROR] 入力 en_us.json が見つかりません: {in_path}")
-            return
-        if out_path is None:
-            out_path = in_path.parent / "ja_jp.json"
-            self.output_path.value = str(out_path)
-            self.output_path.update()
-        elif out_path.is_dir():
-            out_path = out_path / "ja_jp.json"
-            self.output_path.value = str(out_path)
-            self.output_path.update()
+        model = (self._load_value(self.K_MODEL) or self.default_model)
+        effective_gloss = gloss_path if gloss_path and gloss_path.exists() else None
+        if gloss_path and not gloss_path.exists():
+            self._append_log(f"[WARN] 用語集が見つかりませんでした: {gloss_path}")
+        self._append_log(f"[INFO] リソースパック出力先: {output_dir}")
         self.stop_event.clear()
-        self.btn_start.disabled = True
         self.btn_stop.disabled = False
-        self.btn_start.update()
         self.btn_stop.update()
-        self._set_progress(0, "翻訳開始")
-
-        def _work():
+        total_targets = len(targets)
+        produced: list[tuple[str, Path]] = []
+        aborted = False
+        try:
+            for idx, (modid, in_path) in enumerate(targets, start=1):
+                if self.stop_event.is_set():
+                    aborted = True
+                    break
+                if not in_path.exists():
+                    self._append_log(f"[WARN] en_us.json が見つかりません: {in_path}")
+                    continue
+                out_path = in_path.parent / "ja_jp.json"
+                self._append_log(f"[RUN] 翻訳 {idx}/{total_targets}: {modid} -> {out_path}")
+                self._set_progress(0.0, f"翻訳 {idx}/{total_targets}")
+                try:
+                    result = translate_localizations(
+                        api_key=api_key,
+                        model=model,
+                        in_path=in_path,
+                        out_path=out_path,
+                        gloss_path=effective_gloss,
+                        log=self._append_log,
+                        progress=self._set_progress,
+                        should_stop=self.stop_event.is_set,
+                    )
+                    if result.stopped:
+                        self._append_log("[INFO] ユーザーによって翻訳が停止されました。")
+                        aborted = True
+                        break
+                    if out_path.exists():
+                        produced.append((modid, out_path))
+                    self._append_log(f"[OK] ja_jp.json を作成しました: {out_path}")
+                except Exception as ex:
+                    self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
+                    self._append_log(traceback.format_exc())
+                    aborted = True
+                    break
+        finally:
+            self.stop_event.clear()
+            self.btn_stop.disabled = True
+            self.btn_stop.update()
+        if produced and not aborted:
             try:
-                translate_localizations(
-                    api_key=api_key,
-                    model=model,
-                    in_path=in_path,
-                    out_path=out_path,
-                    gloss_path=gloss_path,
-                    log=self._append_log,
-                    progress=self._set_progress,
-                    should_stop=self.stop_event.is_set,
-                )
+                pack_dir = self._generate_resource_pack(jar_path, temp_dir, output_dir, produced)
+                if pack_dir:
+                    self._append_log(f"[OK] リソースパックを更新しました: {pack_dir}")
+                    pack_png = pack_dir / "pack.png"
+                    if not pack_png.exists():
+                        self._append_log(f"[INFO] pack.png は手動で配置してください: {pack_png}")
             except Exception as ex:
-                self._append_log("[ERROR] 予期せぬエラー: " + repr(ex))
+                self._append_log(f"[ERROR] リソースパックの生成に失敗しました: {repr(ex)}")
                 self._append_log(traceback.format_exc())
-            finally:
-                self.btn_start.disabled = False
-                self.btn_stop.disabled = True
-                self.btn_start.update()
-                self.btn_stop.update()
-
-        self.worker = threading.Thread(target=_work, daemon=True)
-        self.worker.start()
+        elif aborted:
+            self._append_log("[WARN] 翻訳が完了しなかったため、リソースパックの作成をスキップしました。")
+        else:
+            self._append_log("[WARN] ja_jp.json が生成されなかったため、リソースパックの作成をスキップしました。")
 
     def on_stop(self, e: ft.ControlEvent):
         self.stop_event.set()
         self._append_log("[INFO] 停止要求を送信しました。現在のバッチ終了後に停止します。")
+
+    def _generate_resource_pack(
+        self,
+        jar_path: Path,
+        temp_dir: Path,
+        output_dir: Path,
+        produced: list[tuple[str, Path]],
+    ) -> Path | None:
+        if not produced:
+            return None
+        self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
+        pack_name = f"{jar_path.stem}_ja_resourcepack" if jar_path.stem else "ja_resourcepack"
+        pack_dir = output_dir / pack_name
+        preserved_pack_png: bytes | None = None
+        if pack_dir.exists():
+            pack_png_path = pack_dir / "pack.png"
+            if pack_png_path.exists():
+                try:
+                    preserved_pack_png = pack_png_path.read_bytes()
+                    self._append_log(f"[INFO] 既存の pack.png を退避します: {pack_png_path}")
+                except Exception:
+                    preserved_pack_png = None
+        if pack_dir.exists():
+            shutil.rmtree(pack_dir)
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        self._apply_template_files(pack_dir)
+        assets_dir = pack_dir / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        for modid, ja_path in produced:
+            target_dir = assets_dir / modid / "lang"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ja_path, target_dir / "ja_jp.json")
+        self._write_pack_mcmeta(pack_dir, jar_path)
+        if preserved_pack_png is not None:
+            (pack_dir / "pack.png").write_bytes(preserved_pack_png)
+        return pack_dir
+
+    def _write_pack_mcmeta(self, pack_dir: Path, jar_path: Path):
+        latest_pack_format = 34
+        description = f"{jar_path.stem} 日本語ローカライズ\n生成日: {datetime.now().strftime('%Y-%m-%d')}"
+        pack_meta = {
+            "pack": {
+                "pack_format": latest_pack_format,
+                "supported_formats": {
+                    "edition": "java",
+                    "min_inclusive": 1,
+                    "max_inclusive": latest_pack_format,
+                },
+                "description": description,
+            }
+        }
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        mcmeta_path = pack_dir / "pack.mcmeta"
+        mcmeta_path.write_text(json.dumps(pack_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _apply_template_files(self, pack_dir: Path):
+        if not RESOURCE_TEMPLATE_DIR.exists():
+            return
+        for item in RESOURCE_TEMPLATE_DIR.iterdir():
+            if item.name in {"pack.mcmeta", "pack.png"}:
+                continue
+            target = pack_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            elif item.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
 
 
 def main(page: ft.Page):
