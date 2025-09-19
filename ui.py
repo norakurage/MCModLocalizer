@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from xml.sax import saxutils
 
 import flet as ft
 
@@ -23,6 +28,17 @@ except Exception:
     keyring = None
 
 
+@dataclass
+class TranslationSummary:
+    translated_mods: int
+    total_mods: int
+    translated_entries: int
+    total_entries: int
+    aborted: bool
+    had_error: bool
+    pack_dir: Path | None
+
+
 class LocalizeApp:
     def __init__(self, page: ft.Page):
         self.page = page
@@ -30,11 +46,11 @@ class LocalizeApp:
         # 保存キー
         self.K_API = "openai_api_key"
         self.K_MODEL = "openai_model"
-        self.K_GLOSS = "glossary_path"
         self.K_SAVE_MODE = "save_mode"  # "keyring" or "local"
         self.K_DIR_JAR = "dir_mod_jar"
         self.K_DIR_OUTPUT = "dir_output_pack"
-        self.K_DIR_GLOSSARY = "dir_glossary_csv"
+        self.K_LAST_JAR_PATH = "last_mod_jar_path"
+        self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
         # 既定値
         self.default_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         # -------------- UI 構築 --------------
@@ -49,19 +65,27 @@ class LocalizeApp:
         self.progress = ft.ProgressBar(width=420, value=0)
         self.counter = ft.Text("待機中")
         # -------- 抽出タブ UI --------
-        self.mod_jar_path = ft.TextField(label="Mod JAR（必須）", dense=True, expand=True)
-        self.output_dir = ft.TextField(label="出力フォルダ（リソースパック保存先）", dense=True, expand=True)
-        self.glossary_path = ft.TextField(label="用語集 CSV（任意）", dense=True, expand=True)
+        self.mod_jar_path = ft.TextField(
+            label="Mod JAR（必須）",
+            dense=True,
+            expand=True,
+            read_only=True,
+            value=self._load_value(self.K_LAST_JAR_PATH) or "",
+        )
+        self.output_dir = ft.TextField(
+            label="出力フォルダ（リソースパック保存先）",
+            dense=True,
+            expand=True,
+            read_only=True,
+            value=self._load_value(self.K_LAST_OUTPUT_PATH) or "",
+        )
         self.fp_jar = ft.FilePicker(on_result=self._on_pick_jar)
         self.fp_dir = ft.FilePicker(on_result=self._on_pick_dir)
-        self.fp_gloss = ft.FilePicker(on_result=self._on_pick_glossary)
-        self.page.overlay.extend([self.fp_jar, self.fp_dir, self.fp_gloss])
+        self.page.overlay.extend([self.fp_jar, self.fp_dir])
         pick_jar_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="Mod JAR を選択",
                                      on_click=self._open_jar_picker)
         pick_dir_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="出力フォルダを選択",
                                      on_click=self._open_output_dir_picker)
-        pick_gloss_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="用語集 CSV を選択",
-                                       on_click=self._open_glossary_picker)
         self.btn_extract = ft.ElevatedButton("抽出 / ja_jp 生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
         self.btn_stop = ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=self.on_stop, disabled=True)
         extract_tab = ft.Column(
@@ -69,7 +93,6 @@ class LocalizeApp:
                 ft.Text("ステップ: JAR から en_us.json を抽出し、ja_jp.json まで自動生成します。", weight=ft.FontWeight.BOLD),
                 ft.Row([self.mod_jar_path, pick_jar_btn], alignment=ft.MainAxisAlignment.START),
                 ft.Row([self.output_dir, pick_dir_btn], alignment=ft.MainAxisAlignment.START),
-                ft.Row([self.glossary_path, pick_gloss_btn], alignment=ft.MainAxisAlignment.START),
                 ft.Row([self.btn_extract, self.btn_stop, self.progress, self.counter], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self.log,
             ],
@@ -134,10 +157,6 @@ class LocalizeApp:
         init_dir = self._get_initial_directory(self.K_DIR_OUTPUT)
         self.fp_dir.get_directory_path(initial_directory=init_dir)
 
-    def _open_glossary_picker(self, e: ft.ControlEvent):
-        init_dir = self._get_initial_directory(self.K_DIR_GLOSSARY)
-        self.fp_gloss.pick_files(initial_directory=init_dir, allowed_extensions=["csv"], allow_multiple=False)
-
     # ------------------------------
     # FilePicker handlers
     # ------------------------------
@@ -146,6 +165,7 @@ class LocalizeApp:
             selected = Path(e.files[0].path)
             self.mod_jar_path.value = str(selected)
             self.mod_jar_path.update()
+            self._save_value(self.K_LAST_JAR_PATH, str(selected))
             self._remember_dir(self.K_DIR_JAR, selected)
 
     def _on_pick_dir(self, e: ft.FilePickerResultEvent):
@@ -153,14 +173,8 @@ class LocalizeApp:
             selected = Path(e.path)
             self.output_dir.value = str(selected)
             self.output_dir.update()
+            self._save_value(self.K_LAST_OUTPUT_PATH, str(selected))
             self._remember_dir(self.K_DIR_OUTPUT, selected)
-
-    def _on_pick_glossary(self, e: ft.FilePickerResultEvent):
-        if e.files:
-            selected = Path(e.files[0].path)
-            self.glossary_path.value = str(selected)
-            self.glossary_path.update()
-            self._remember_dir(self.K_DIR_GLOSSARY, selected)
 
     # ------------------------------
     # Settings
@@ -245,6 +259,48 @@ class LocalizeApp:
             self.counter.value = text
             self.counter.update()
 
+    def _show_completion_toast(self, message: str, *, is_error: bool = False):
+        if sys.platform != "win32":
+            return
+        try:
+            self._show_windows_toast(APP_NAME, message, is_error=is_error)
+        except Exception as ex:
+            self._append_log(f"[WARN] Windowsトーストの表示に失敗しました: {repr(ex)}")
+
+    def _show_windows_toast(self, title: str, message: str, *, is_error: bool = False):
+        if sys.platform != "win32":
+            return
+        body = saxutils.escape(message.replace("\r\n", "\n").replace("\r", "\n")).replace("\n", "&#10;")
+        header_text = f"{title} - エラー" if is_error else title
+        header = saxutils.escape(header_text)
+        visual = f"<toast><visual><binding template='ToastGeneric'><text>{header}</text><text>{body}</text></binding></visual></toast>"
+        script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml(@"
+{visual}
+"@)
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(1)
+$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{APP_NAME}')
+$notifier.Show($toast)
+"""
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        flags = 0
+        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+        if hasattr(subprocess, "DETACHED_PROCESS"):
+            flags |= subprocess.DETACHED_PROCESS
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+            creationflags=flags,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+
     # ------------------------------
     # 抽出フロー
     # ------------------------------
@@ -253,8 +309,6 @@ class LocalizeApp:
         jar_path = Path(jar_path_value) if jar_path_value else None
         out_dir_value = self.output_dir.value.strip()
         out_dir = Path(out_dir_value) if out_dir_value else None
-        gloss_path_value = self.glossary_path.value.strip()
-        gloss_path = Path(gloss_path_value) if gloss_path_value else None
         if not jar_path or not jar_path.exists():
             display = jar_path if jar_path else "(未指定)"
             self._append_log(f"[ERROR] Mod JAR が見つかりません: {display}")
@@ -271,8 +325,8 @@ class LocalizeApp:
                 return
         self._remember_dir(self.K_DIR_JAR, jar_path)
         self._remember_dir(self.K_DIR_OUTPUT, out_dir)
-        if gloss_path:
-            self._remember_dir(self.K_DIR_GLOSSARY, gloss_path)
+        self._save_value(self.K_LAST_JAR_PATH, str(jar_path))
+        self._save_value(self.K_LAST_OUTPUT_PATH, str(out_dir))
         self.btn_extract.disabled = True
         self.btn_extract.update()
         self._set_progress(0.0, "抽出開始")
@@ -280,6 +334,8 @@ class LocalizeApp:
         def _work():
             temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
             temp_dir_path: Path | None = None
+            toast_message = "処理が完了しました。"
+            toast_is_error = False
             try:
                 temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
                 temp_dir_path = Path(temp_dir_obj.name)
@@ -298,13 +354,31 @@ class LocalizeApp:
                         targets.append((modid, en_path))
                 if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
-                    self._translate_targets(targets, gloss_path, jar_path, temp_dir_path, out_dir)
+                    summary = self._translate_targets(targets, jar_path, temp_dir_path, out_dir)
+                    if summary.aborted:
+                        toast_message = "翻訳が停止されました。"
+                        toast_is_error = True
+                    elif summary.had_error:
+                        toast_message = "翻訳処理でエラーが発生しました。ログを確認してください。"
+                        toast_is_error = True
+                    elif summary.translated_mods == 0:
+                        toast_message = "翻訳対象の ja_jp.json は生成されませんでした。"
+                    else:
+                        mod_part = f"{summary.translated_mods}/{summary.total_mods} Mod"
+                        if summary.total_entries:
+                            entry_part = f"、{summary.translated_entries}/{summary.total_entries} 件"
+                        else:
+                            entry_part = ""
+                        toast_message = f"翻訳が完了しました ({mod_part}{entry_part})。"
                 else:
                     self._set_progress(1.0, "抽出完了")
                     self._append_log("[WARN] 翻訳対象となる en_us.json が見つかりませんでした。")
+                    toast_message = "抽出完了 (翻訳対象なし)。"
             except Exception as ex:
                 self._append_log("[ERROR] 抽出処理で例外: " + repr(ex))
                 self._append_log(traceback.format_exc())
+                toast_message = "処理中にエラーが発生しました。ログを確認してください。"
+                toast_is_error = True
             finally:
                 if temp_dir_obj:
                     temp_dir_obj.cleanup()
@@ -312,34 +386,43 @@ class LocalizeApp:
                         self._append_log(f"[INFO] 一時作業フォルダを削除しました: {temp_dir_path}")
                 self.btn_extract.disabled = False
                 self.btn_extract.update()
+                self._show_completion_toast(toast_message, is_error=toast_is_error)
 
         threading.Thread(target=_work, daemon=True).start()
 
     def _translate_targets(
         self,
         targets: list[tuple[str, Path]],
-        gloss_path: Path | None,
         jar_path: Path,
         temp_dir: Path,
         output_dir: Path,
-    ):
+    ) -> TranslationSummary:
+        total_targets = len(targets)
         api_key = self._load_api_key()
         if not api_key:
             self._append_log("[ERROR] API キーが未設定です。設定タブで保存してください。")
             self.tabs.selected_index = 1
             self.tabs.update()
-            return
+            return TranslationSummary(
+                translated_mods=0,
+                total_mods=total_targets,
+                translated_entries=0,
+                total_entries=0,
+                aborted=False,
+                had_error=True,
+                pack_dir=None,
+            )
         model = (self._load_value(self.K_MODEL) or self.default_model)
-        effective_gloss = gloss_path if gloss_path and gloss_path.exists() else None
-        if gloss_path and not gloss_path.exists():
-            self._append_log(f"[WARN] 用語集が見つかりませんでした: {gloss_path}")
         self._append_log(f"[INFO] リソースパック出力先: {output_dir}")
         self.stop_event.clear()
         self.btn_stop.disabled = False
         self.btn_stop.update()
-        total_targets = len(targets)
         produced: list[tuple[str, Path]] = []
         aborted = False
+        had_error = False
+        total_entries = 0
+        translated_entries = 0
+        pack_dir_path: Path | None = None
         try:
             for idx, (modid, in_path) in enumerate(targets, start=1):
                 if self.stop_event.is_set():
@@ -350,18 +433,25 @@ class LocalizeApp:
                     continue
                 out_path = in_path.parent / "ja_jp.json"
                 self._append_log(f"[RUN] 翻訳 {idx}/{total_targets}: {modid} -> {out_path}")
-                self._set_progress(0.0, f"翻訳 {idx}/{total_targets}")
+                self._set_progress(0.0, f"翻訳 {idx}/{total_targets} ({modid})")
+
+                def _progress_wrapper(ratio: float, text: str, *, _modid: str = modid):
+                    label = text.strip()
+                    label = f"{_modid}: {label}" if label else _modid
+                    self._set_progress(ratio, label)
+
                 try:
                     result = translate_localizations(
                         api_key=api_key,
                         model=model,
                         in_path=in_path,
                         out_path=out_path,
-                        gloss_path=effective_gloss,
                         log=self._append_log,
-                        progress=self._set_progress,
+                        progress=_progress_wrapper,
                         should_stop=self.stop_event.is_set,
                     )
+                    total_entries += result.total
+                    translated_entries += result.created
                     if result.stopped:
                         self._append_log("[INFO] ユーザーによって翻訳が停止されました。")
                         aborted = True
@@ -370,6 +460,7 @@ class LocalizeApp:
                         produced.append((modid, out_path))
                     self._append_log(f"[OK] ja_jp.json を作成しました: {out_path}")
                 except Exception as ex:
+                    had_error = True
                     self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
                     self._append_log(traceback.format_exc())
                     aborted = True
@@ -382,17 +473,28 @@ class LocalizeApp:
             try:
                 pack_dir = self._generate_resource_pack(jar_path, temp_dir, output_dir, produced)
                 if pack_dir:
+                    pack_dir_path = pack_dir
                     self._append_log(f"[OK] リソースパックを更新しました: {pack_dir}")
                     pack_png = pack_dir / "pack.png"
                     if not pack_png.exists():
                         self._append_log(f"[INFO] pack.png は手動で配置してください: {pack_png}")
             except Exception as ex:
+                had_error = True
                 self._append_log(f"[ERROR] リソースパックの生成に失敗しました: {repr(ex)}")
                 self._append_log(traceback.format_exc())
         elif aborted:
             self._append_log("[WARN] 翻訳が完了しなかったため、リソースパックの作成をスキップしました。")
         else:
             self._append_log("[WARN] ja_jp.json が生成されなかったため、リソースパックの作成をスキップしました。")
+        return TranslationSummary(
+            translated_mods=len(produced),
+            total_mods=total_targets,
+            translated_entries=translated_entries,
+            total_entries=total_entries,
+            aborted=aborted,
+            had_error=had_error,
+            pack_dir=pack_dir_path,
+        )
 
     def on_stop(self, e: ft.ControlEvent):
         self.stop_event.set()
