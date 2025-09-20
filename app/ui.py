@@ -57,6 +57,7 @@ class LocalizeApp:
         self.K_LAST_JAR_PATH = "last_mod_jar_path"
         self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
         self.K_USAGE_HISTORY = "token_usage_history"
+        self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
         # 既定値
         self.model_pricing = {
             "gpt-5": {"input": 1.25, "cached_input": 0.13, "output": 10.00},
@@ -150,6 +151,7 @@ class LocalizeApp:
             value=saved_model,
             options=[ft.dropdown.Option(m) for m in self.available_models],
             dense=True, expand=False, width=220,
+            on_change=self._on_model_change,
         )
         save_mode = (self._load_value(self.K_SAVE_MODE) or ("keyring" if keyring else "local"))
         self.save_mode_switch = ft.Dropdown(
@@ -176,7 +178,9 @@ class LocalizeApp:
         self.token_usage_prompt_text = ft.Text("入力トークン: 0")
         self.token_usage_completion_text = ft.Text("出力トークン: 0")
         self.token_usage_total_text = ft.Text("合計トークン: 0")
-        self.token_usage_cost_text = ft.Text("概算コスト: $0.00")
+        self.total_cost = self._load_total_cost()
+        self.token_usage_cost_text = ft.Text("概算コスト（今回）: $0.00")
+        self.token_usage_cost_total_text = ft.Text(f"概算コスト累計: ${self.total_cost:.2f}")
         self.token_usage_updated_text = ft.Text("更新時刻: -")
         history_rows = [
             ft.DataRow(
@@ -201,6 +205,7 @@ class LocalizeApp:
                 ft.DataColumn(ft.Text("概算コスト")),
             ],
             rows=history_rows,
+            width=None,
         )
         token_tab = ft.Column(
             controls=[
@@ -212,7 +217,22 @@ class LocalizeApp:
                 self.token_usage_cost_text,
                 self.token_usage_updated_text,
                 ft.Text("API 利用履歴", weight=ft.FontWeight.BOLD),
-                self.token_usage_history_table,
+                ft.Container(
+                    content=ft.Column(
+                        controls=[self.token_usage_history_table],
+                        tight=True,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                    expand=True,
+                    width=float("inf"),
+                    height=240,
+                    border=ft.border.all(1, ft.Colors.TRANSPARENT),
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                ),
+                ft.Row(
+                    controls=[self.token_usage_cost_total_text],
+                    alignment=ft.MainAxisAlignment.END,
+                ),
             ],
             expand=True,
             spacing=12,
@@ -222,8 +242,8 @@ class LocalizeApp:
             selected_index=0,
             tabs=[
                 ft.Tab(text="抽出", icon=ft.Icons.DOWNLOAD, content=extract_tab),
-                ft.Tab(text="設定", icon=ft.Icons.SETTINGS, content=settings_tab),
                 ft.Tab(text="トークン", icon=ft.Icons.ASSESSMENT, content=token_tab),
+                ft.Tab(text="設定", icon=ft.Icons.SETTINGS, content=settings_tab),
             ],
             expand=True,
         )
@@ -317,6 +337,13 @@ class LocalizeApp:
                 self._append_log("[WARN] keyring への保存に失敗。ローカル保存にフォールバックします。")
         self._save_value(self.K_API, value)
 
+    def _on_model_change(self, e: ft.ControlEvent):
+        value = (self.model_field.value or "").strip()
+        if value not in self.available_models:
+            return
+        self._save_value(self.K_MODEL, value)
+        self._append_log(f"[INFO] モデル選択を更新しました: {value}")
+
     def _load_usage_history(self) -> list[dict[str, object]]:
         raw = self._load_value(self.K_USAGE_HISTORY)
         if not raw:
@@ -366,6 +393,15 @@ class LocalizeApp:
             )
         return history
 
+    def _load_total_cost(self) -> float:
+        raw = self._load_value(self.K_USAGE_TOTAL_COST)
+        if not raw:
+            return 0.0
+        try:
+            return float(raw)
+        except Exception:
+            return 0.0
+
     def _persist_usage_history(self) -> None:
         try:
             payload = json.dumps(self.usage_history, ensure_ascii=False)
@@ -373,9 +409,18 @@ class LocalizeApp:
         except Exception as ex:
             self._append_log(f"[WARN] トークン使用履歴の保存に失敗しました: {repr(ex)}")
 
+    def _persist_total_cost(self) -> None:
+        try:
+            self._save_value(self.K_USAGE_TOTAL_COST, f"{self.total_cost:.6f}")
+        except Exception as ex:
+            self._append_log(f"[WARN] トークン累計コストの保存に失敗しました: {repr(ex)}")
+
     def _refresh_usage_history_table(self) -> None:
         rows: list[ft.DataRow] = []
+        total_cost = 0.0
         for record in self.usage_history:
+            cost_value = float(record.get("cost", 0.0))
+            total_cost += cost_value
             rows.append(
                 ft.DataRow(
                     cells=[
@@ -384,7 +429,7 @@ class LocalizeApp:
                         ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
                         ft.DataCell(ft.Text(str(record.get("completion", 0)))),
                         ft.DataCell(ft.Text(str(record.get("total", 0)))),
-                        ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.2f}")),
+                        ft.DataCell(ft.Text(f"${cost_value:.2f}")),
                     ]
                 )
             )
@@ -431,6 +476,7 @@ class LocalizeApp:
                     cost += pricing["input"] * prompt / 1_000_000
                     cost += pricing["output"] * completion / 1_000_000
                 last_cost_total += cost
+                self.total_cost += cost
                 record = {
                     "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     "model": summary.model or "(不明)",
@@ -444,6 +490,7 @@ class LocalizeApp:
             if len(self.usage_history) > 200:
                 self.usage_history = self.usage_history[-200:]
             self._persist_usage_history()
+            self._persist_total_cost()
 
         if summary.total_tokens > 0:
             calls = len(summary.usage_records)
@@ -469,11 +516,12 @@ class LocalizeApp:
         self.token_usage_completion_text.value = f"出力トークン: {summary.completion_tokens}"
         self.token_usage_total_text.value = f"合計トークン: {summary.total_tokens}"
         if summary.usage_records and pricing:
-            self.token_usage_cost_text.value = f"概算コスト: ${last_cost_total:.2f} (今回の合計)"
+            self.token_usage_cost_text.value = f"概算コスト（今回）: ${last_cost_total:.2f}"
         elif summary.usage_records:
-            self.token_usage_cost_text.value = "概算コスト: 不明 (料金表に無いモデル)"
+            self.token_usage_cost_text.value = "概算コスト（今回）: 不明 (料金表に無いモデル)"
         else:
-            self.token_usage_cost_text.value = "概算コスト: $0.00"
+            self.token_usage_cost_text.value = "概算コスト（今回）: $0.00"
+        self.token_usage_cost_total_text.value = f"概算コスト累計: ${self.total_cost:.2f}"
         self.token_usage_updated_text.value = f"更新時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
         self._refresh_usage_history_table()
