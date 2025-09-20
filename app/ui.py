@@ -16,7 +16,7 @@ from xml.sax import saxutils
 
 import flet as ft
 
-from app.processing import ExtractionResult, extract_localizations, translate_localizations
+from processing import ExtractionResult, extract_localizations, translate_localizations
 
 APP_NAME = "MC Localizer"
 BASE_DIR = Path(__file__).resolve().parent

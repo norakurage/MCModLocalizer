@@ -171,7 +171,6 @@ def translate_batch(client: OpenAI, items: List[Dict[str, str]], model: str, sys
             model=model,
             instructions=system_instructions + extra_note,
             input=user_text,
-            temperature=0.2,
         )
         if with_response_format:
             args["response_format"] = response_format_schema
@@ -197,7 +196,6 @@ def translate_batch(client: OpenAI, items: List[Dict[str, str]], model: str, sys
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.2,
             response_format={"type": "json_object"},
         )
         content = ""
