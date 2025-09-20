@@ -9,7 +9,6 @@ Minecraft Mod 向けの `en_us.json` を OpenAI API で日本語化 (`ja_jp.json
 - `%s` や `§a`、`{name}` のようなトークンを自動保護し、バッチ翻訳後に原文どおり復元
 - API キーを keyring またはローカルストレージに安全保存でき、環境変数でも指定可能
 - 実行ログ・進捗バー・停止ボタン・Windows トースト通知（Windows 10+）で処理状況を把握
-- プロジェクト直下の `a/` フォルダをテンプレートとしてリソースパックへマージし、既存の `pack.png` を自動的に引き継ぎ
 
 ## 必要条件
 - Python 3.10 以上（Flet 0.28.3+ 推奨）
@@ -57,10 +56,8 @@ Tips:
   - `pack.mcmeta`：`supported_formats` 付きで最新 pack format に対応
   - `assets/<modid>/lang/ja_jp.json`：OpenAI で翻訳した日本語ローカライズ
   - （存在する場合）`pack.png`：既存のアイコンを自動コピー
-  - テンプレートを配置した `a/` フォルダ内のファイル
 
 ## テンプレートについて
-- プロジェクト直下に `a/` フォルダを作成すると、その配下のファイル・フォルダがリソースパックのルートにマージされます。
 - `pack.mcmeta` と `pack.png` だけは特別扱いされ、`pack.mcmeta` はツールが生成したものが優先され、`pack.png` は既存ファイルが無い場合のみテンプレートからコピーされます。
 
 ## Windows 向け EXE ビルド
@@ -74,7 +71,6 @@ Set-Location <リポジトリのパス>
 スクリプトは `.venv-build/` に仮想環境を作成し、`requirements.txt` とビルドに必要な PyInstaller をインストールしたあと `python -m flet pack` でパッケージングします。完了すると `dist/MC Localizer/MC Localizer.exe` が出力されます。
 
 ヒント:
-- `a/` フォルダが存在する場合は自動的にパッケージへ同梱されます（無い場合はスキップ）。
 - 再ビルド時に環境を作り直したい場合は `-Clean` オプションを付けて実行してください。
 - 独自のアイコンを設定したい場合は `scripts/build_windows_exe.ps1` 内の `flet pack` コマンドに `--icon <icoファイル>` を追記します。
 
@@ -91,4 +87,4 @@ Set-Location <リポジトリのパス>
 - Flet 0.28.3 以降の PascalCase API（`Icons` / `Colors` / `Alignment`）に合わせています。
 - メイン処理はバックグラウンドスレッドで実行し、UI スレッドはログ更新のみ行います。
 - OpenAI Responses API（`client.responses.create`）を利用しているため、`python-openai` v1 系が必要です。
-- リソースパック生成時に `a/` フォルダをテンプレートとしてマージし、`pack.png` を退避・復元します。
+

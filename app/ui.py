@@ -86,7 +86,7 @@ class LocalizeApp:
                                      on_click=self._open_jar_picker)
         pick_dir_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="出力フォルダを選択",
                                      on_click=self._open_output_dir_picker)
-        self.btn_extract = ft.ElevatedButton("抽出 / ja_jp 生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
+        self.btn_extract = ft.ElevatedButton("抽出 / リソースパック生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
         self.btn_stop = ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=self.on_stop, disabled=True)
         extract_tab = ft.Column(
             controls=[
@@ -144,7 +144,7 @@ class LocalizeApp:
             expand=True,
         )
         page.add(self.tabs)
-        self._append_log("準備完了。JAR と出力フォルダを指定して抽出を実行すると ja_jp.json とリソースパックを自動生成します。")
+        self._append_log("準備完了。JAR と出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
 
     # ------------------------------
     # FilePicker launchers
@@ -510,7 +510,9 @@ $notifier.Show($toast)
         if not produced:
             return None
         self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
-        pack_name = f"{jar_path.stem}_ja_resourcepack" if jar_path.stem else "ja_resourcepack"
+        primary_modid = produced[0][0] if produced and produced[0][0] else jar_path.stem
+        base_name = primary_modid or (jar_path.stem or "ja_resource")
+        pack_name = f"{base_name}_ja_resource"
         pack_dir = output_dir / pack_name
         preserved_pack_png: bytes | None = None
         if pack_dir.exists():
@@ -531,14 +533,14 @@ $notifier.Show($toast)
             target_dir = assets_dir / modid / "lang"
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ja_path, target_dir / "ja_jp.json")
-        self._write_pack_mcmeta(pack_dir, jar_path)
+        self._write_pack_mcmeta(pack_dir, base_name)
         if preserved_pack_png is not None:
             (pack_dir / "pack.png").write_bytes(preserved_pack_png)
         return pack_dir
 
-    def _write_pack_mcmeta(self, pack_dir: Path, jar_path: Path):
+    def _write_pack_mcmeta(self, pack_dir: Path, mod_name: str):
         latest_pack_format = 34
-        description = f"{jar_path.stem} 日本語ローカライズ\n生成日: {datetime.now().strftime('%Y-%m-%d')}"
+        description = f"{mod_name} 日本語ローカライズ\n生成日: {datetime.now().strftime('%Y-%m-%d')}"
         pack_meta = {
             "pack": {
                 "pack_format": latest_pack_format,

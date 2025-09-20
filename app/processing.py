@@ -209,10 +209,8 @@ def translate_batch(client: OpenAI, items: List[Dict[str, str]], model: str, sys
     inter = expected_key_set.intersection(data.keys())
     if len(inter) < len(expected_key_set):
         note = ("\n出力は次の形式のみ：{<item.key>: <日本語訳>}。キー名 'key' や 'value' を出力キーとして使わないこと。余計な文字や説明は一切書かないこと。")
+        data = _call_chat(note)
         inter = expected_key_set.intersection(data.keys())
-        if len(inter) < len(expected_key_set):
-            data = _call_chat(note)
-            inter = expected_key_set.intersection(data.keys())
     if len(inter) < len(expected_key_set):
         missing = [k for k in unique_keys if not data.get(k)]
         snippet = (last_raw or "").strip().replace("\r", " ").replace("\n", " ")[:400]
@@ -262,10 +260,6 @@ def write_json(path: Path, data: Dict[str, str]):
     tmp.replace(path)
 
 
-def make_skeleton(en_map: Dict[str, str]) -> Dict[str, str]:
-    return {k: "" for k in en_map.keys()}
-
-
 @dataclass
 class ExtractionResult:
     primary_modid: Optional[str]
@@ -304,9 +298,7 @@ def extract_localizations(
     for modid, en_map in mod_maps.items():
         mod_dir = out_dir / modid
         en_path = mod_dir / "en_us.json"
-        skel_path = mod_dir / "ja_jp.skeleton.json"
         write_json(en_path, en_map)
-        write_json(skel_path, make_skeleton(en_map))
         if log:
             log(f"[OK] 抽出: {modid} -> {en_path}")
         if primary_modid == modid:
@@ -315,8 +307,7 @@ def extract_localizations(
         if progress:
             progress(done / total, f"{done}/{total}")
     if log and primary_modid and primary_map is not None:
-        log(f"[INFO] 代表 modid: {primary_modid}（キー数: {len(primary_map)}）")
-        log("[OK] ひな形 (ja_jp.skeleton.json) を作成しました。")
+        log(f"[INFO] modid: {primary_modid}（キー数: {len(primary_map)}）")
     if progress:
         progress(1.0, f"{total}/{total}")
     return ExtractionResult(primary_modid=primary_modid, primary_en_path=primary_en_path, mod_maps=mod_maps)
@@ -373,9 +364,8 @@ def translate_localizations(
         kv: Dict[str, Tuple[str, Dict[str, str]]] = {}
         payload: List[Dict[str, str]] = []
         for k, protected in batch:
-            protected2, m = protect_tokens(protected)
-            kv[k] = (protected2, m)
-            payload.append({"key": k, "value": protected2})
+            kv[k] = (protected, {})
+            payload.append({"key": k, "value": protected})
         out_map = translate_batch(client, payload, model=model, system_instructions=system_instructions)
         for k, (protected2, m) in kv.items():
             ja = out_map.get(k, "") or protected2
