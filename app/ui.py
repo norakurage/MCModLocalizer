@@ -509,12 +509,40 @@ class LocalizeApp:
             pass
         self.log.update()
 
+    def _format_path(self, value: Path | str | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, Path):
+            candidate = value.name or value.stem
+            return candidate or str(value)
+        text = str(value)
+        if not text:
+            return text
+        try:
+            path = Path(text)
+            candidate = path.name or path.stem
+            return candidate or text
+        except Exception:
+            return text
+
+    def _render_progress_bar(self, ratio: float, width: int = 20) -> str:
+        clamped = max(0.0, min(1.0, ratio))
+        filled = int(clamped * width)
+        if clamped > 0.0 and filled == 0:
+            filled = 1
+        filled = max(0, min(width, filled))
+        bar = "█" * filled + "░" * (width - filled)
+        percent = int(clamped * 100)
+        return f"[{bar}] {percent:3d}%"
+
     def _set_progress(self, ratio: float, text: str = ""):
-        self.progress.value = max(0.0, min(1.0, ratio))
+        clamped = max(0.0, min(1.0, ratio))
+        self.progress.value = clamped
         self.progress.update()
-        if text:
-            self.counter.value = text
-            self.counter.update()
+        bar = self._render_progress_bar(clamped)
+        label = text.strip()
+        self.counter.value = f"{bar} {label}" if label else bar
+        self.counter.update()
 
     def _update_token_usage_ui(self, summary: TranslationSummary):
         pricing = self.model_pricing.get(summary.model)
@@ -634,7 +662,7 @@ $notifier.Show($toast)
         out_dir_value = self.output_dir.value.strip()
         out_dir = Path(out_dir_value) if out_dir_value else None
         if not mods_dir or not mods_dir.exists() or not mods_dir.is_dir():
-            display = mods_dir if mods_dir else "(未指定)"
+            display = self._format_path(mods_dir) if mods_dir else "(未指定)"
             self._append_log(f"[ERROR] Mods フォルダが見つかりません: {display}")
             return
         if out_dir is None:
@@ -643,7 +671,7 @@ $notifier.Show($toast)
         if not out_dir.exists():
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
-                self._append_log(f"[INFO] 出力フォルダを作成しました: {out_dir}")
+                self._append_log(f"[INFO] 出力フォルダを作成しました: {self._format_path(out_dir)}")
             except Exception as ex:
                 self._append_log(f"[ERROR] 出力フォルダを作成できません: {repr(ex)}")
                 return
@@ -663,8 +691,8 @@ $notifier.Show($toast)
             try:
                 temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
                 temp_dir_path = Path(temp_dir_obj.name)
-                self._append_log(f"[INFO] 一時作業フォルダ: {temp_dir_path}")
-                self._append_log(f"[RUN] 抽出: {mods_dir}")
+                self._append_log(f"[INFO] 一時作業フォルダ: {self._format_path(temp_dir_path)}")
+                self._append_log(f"[RUN] 抽出: {self._format_path(mods_dir)}")
                 result: ExtractionResult = extract_localizations(
                     mods_dir,
                     temp_dir_path,
@@ -709,7 +737,9 @@ $notifier.Show($toast)
                 if temp_dir_obj:
                     temp_dir_obj.cleanup()
                     if temp_dir_path:
-                        self._append_log(f"[INFO] 一時作業フォルダを削除しました: {temp_dir_path}")
+                        self._append_log(
+                            f"[INFO] 一時作業フォルダを削除しました: {self._format_path(temp_dir_path)}"
+                        )
                 self.btn_extract.disabled = False
                 self.btn_extract.update()
                 self._show_completion_toast(toast_message, is_error=toast_is_error)
@@ -747,7 +777,7 @@ $notifier.Show($toast)
         model = model.strip()
         if model not in self.available_models:
             model = self.available_models[0]
-        self._append_log(f"[INFO] リソースパック出力先: {output_dir}")
+        self._append_log(f"[INFO] リソースパック出力先: {self._format_path(output_dir)}")
         self.stop_event.clear()
         self.btn_stop.disabled = False
         self.btn_stop.update()
@@ -778,11 +808,13 @@ $notifier.Show($toast)
                     aborted = True
                     break
                 if not in_path.exists():
-                    self._append_log(f"[WARN] en_us.json が見つかりません: {in_path}")
+                    self._append_log(f"[WARN] en_us.json が見つかりません: {self._format_path(in_path)}")
                     continue
                 out_path = in_path.parent / "ja_jp.json"
-                self._append_log(f"[RUN] 翻訳 {idx}/{total_targets}: {modid} -> {out_path}")
-                self._set_progress(0.0, f"翻訳 {idx}/{total_targets} ({modid})")
+                self._append_log(
+                    f"[RUN] 翻訳 {idx}/{total_targets}: {modid} -> {self._format_path(out_path)}"
+                )
+                self._set_progress(0.0, f"{modid}: {idx}/{total_targets}")
 
                 def _progress_wrapper(ratio: float, text: str, *, _modid: str = modid):
                     label = text.strip()
@@ -794,7 +826,8 @@ $notifier.Show($toast)
                 resume_exists = resume_path.exists()
                 if resume_exists:
                     self._append_log(
-                        f"[INFO] 中断済みの翻訳ファイルを検出しました。未訳を引き継ぎます: {resume_path}"
+                        "[INFO] 中断済みの翻訳ファイルを検出しました。未訳を引き継ぎます: "
+                        f"{self._format_path(resume_path)}"
                     )
                 if (
                     pack_lang_path
@@ -803,7 +836,8 @@ $notifier.Show($toast)
                 ):
                     skipped_existing += 1
                     self._append_log(
-                        f"[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします: {pack_lang_path}"
+                        "[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします: "
+                        f"{self._format_path(pack_lang_path)}"
                     )
                     self._set_progress(1.0, f"{modid}: 既存訳をスキップ")
                     continue
@@ -845,12 +879,14 @@ $notifier.Show($toast)
                         break
                     if out_path.exists():
                         produced.append((modid, out_path))
-                    self._append_log(f"[OK] ja_jp.json を作成しました: {out_path}")
+                    self._append_log(f"[OK] ja_jp.json を作成しました: {self._format_path(out_path)}")
                     pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
                     if pack_dir:
                         pack_dir_path = pack_dir
                         pack_generated_once = True
-                        self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
+                        self._append_log(
+                            f"[OK] リソースパックを更新しました ({modid}): {self._format_path(pack_dir)}"
+                        )
                         _register_pack_contents(pack_dir)
                 except Exception as ex:
                     had_error = True
@@ -867,10 +903,14 @@ $notifier.Show($toast)
                 pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
                 if pack_dir:
                     pack_dir_path = pack_dir
-                    self._append_log(f"[OK] リソースパックを更新しました: {pack_dir}")
+                    self._append_log(
+                        f"[OK] リソースパックを更新しました: {self._format_path(pack_dir)}"
+                    )
                     pack_png = pack_dir / "pack.png"
                     if not pack_png.exists():
-                        self._append_log(f"[INFO] pack.png は手動で配置してください: {pack_png}")
+                        self._append_log(
+                            f"[INFO] pack.png は手動で配置してください: {self._format_path(pack_png)}"
+                        )
                     _register_pack_contents(pack_dir)
             except Exception as ex:
                 had_error = True
@@ -912,7 +952,9 @@ $notifier.Show($toast)
     ) -> Path | None:
         if not produced:
             return None
-        self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
+        self._append_log(
+            f"[INFO] リソースパック生成: 作業フォルダ {self._format_path(temp_dir)} を参照します。"
+        )
         base_name = self._determine_pack_base_name(source_path)
         if not base_name and produced and produced[0][0]:
             base_name = produced[0][0]

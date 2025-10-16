@@ -410,7 +410,7 @@ def extract_localizations(
         mod_maps = read_en_us_from_jar(jar)
         if not mod_maps:
             if log:
-                log(f"[WARN] en_us.json が見つからないためスキップしました: {jar}")
+                log(f"[WARN] en_us.json が見つからないためスキップしました: {Path(jar).name}")
             continue
         per_jar_maps.append((jar, mod_maps))
         total_mods += len(mod_maps)
@@ -421,8 +421,9 @@ def extract_localizations(
     done = 0
     for jar, mod_maps in per_jar_maps:
         if len(mod_maps) > 1 and log:
-            mods = ", ".join(f"{m}({len(d)} keys)" for m, d in mod_maps.items())
-            log(f"[WARN] 複数 namespace を含む Mod を検出しました ({jar}): {mods}。全て処理します。")
+            header = f"[WARN] 複数 namespace を含む Mod を検出しました ({Path(jar).name})。全て処理します。"
+            detail_lines = [f"- {m} ({len(d)} keys)" for m, d in mod_maps.items()]
+            log("\n".join([header, *detail_lines]))
         ja_maps = read_lang_from_jar(jar, "ja_jp")
         for modid, en_map in mod_maps.items():
             mod_dir = out_dir / modid
@@ -436,7 +437,7 @@ def extract_localizations(
             mod_sources[modid] = jar
             if log:
                 note = " (既存の ja_jp を読み込み)" if existing_ja else ""
-                log(f"[OK] 抽出: {modid} -> {en_path}{note}")
+                log(f"[OK] 抽出: {modid} -> {en_path.name}{note}")
             if primary_modid is None or (len(en_map) > len(primary_map or {})):
                 primary_modid = modid
                 primary_map = en_map
@@ -475,8 +476,8 @@ def translate_localizations(
     if should_stop is None:
         should_stop = lambda: False
     if log:
-        log(f"[RUN] 入力: {in_path}")
-        log(f"[RUN] 出力: {out_path}")
+        log(f"[RUN] 入力: {Path(in_path).name}")
+        log(f"[RUN] 出力: {Path(out_path).name}")
     src: Dict[str, str] = load_json(in_path)
     dst: Dict[str, str] = load_json(out_path)
     resume_data: Dict[str, str] = {}
@@ -506,7 +507,7 @@ def translate_localizations(
     if resume_path and resume_path.exists():
         resume_data = load_json(resume_path)
         if log and resume_data:
-            log(f"[INFO] 中断された翻訳データを読み込みます: {resume_path}")
+            log(f"[INFO] 中断された翻訳データを読み込みます: {Path(resume_path).name}")
         if _merge_missing(resume_data) and log:
             log("[INFO] 中断データから未訳を引き継ぎます。")
     todo: List[Tuple[str, str]] = []
@@ -584,7 +585,7 @@ def translate_localizations(
             time.sleep(sleep_interval)
     write_json(out_path, dst)
     if log:
-        log(f"[OK] 書き込み完了: {out_path}")
+        log(f"[OK] 書き込み完了: {Path(out_path).name}")
     if progress:
         final_ratio = created / max(1, total)
         progress(1.0 if not stopped else final_ratio, f"{created}/{total}")
@@ -593,7 +594,7 @@ def translate_localizations(
         if remaining > 0 or stopped:
             write_json(resume_path, dst)
             if log:
-                log(f"[INFO] 翻訳の進捗を保存しました: {resume_path}")
+                log(f"[INFO] 翻訳の進捗を保存しました: {Path(resume_path).name}")
         else:
             try:
                 if resume_path.exists():
