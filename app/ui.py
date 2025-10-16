@@ -183,19 +183,48 @@ class LocalizeApp:
         self.token_usage_cost_text = ft.Text("概算コスト（今回）: $0.00")
         self.token_usage_cost_total_text = ft.Text(f"概算コスト累計: ${self.total_cost:.2f}")
         self.token_usage_updated_text = ft.Text("更新時刻: -")
-        history_rows = [
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text(str(record.get("timestamp", "-")))),
-                    ft.DataCell(ft.Text(str(record.get("model", "-")))),
-                    ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
-                    ft.DataCell(ft.Text(str(record.get("completion", 0)))),
-                    ft.DataCell(ft.Text(str(record.get("total", 0)))),
-                    ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.2f}")),
-                ]
+        history_rows: list[ft.DataRow] = []
+        history_updated = False
+        for record in self.usage_history:
+            model_name = str(record.get("model", ""))
+            try:
+                prompt_tokens = int(record.get("prompt", 0) or 0)
+            except Exception:
+                prompt_tokens = 0
+            try:
+                completion_tokens = int(record.get("completion", 0) or 0)
+            except Exception:
+                completion_tokens = 0
+            cost_value = float(record.get("cost", 0.0) or 0.0)
+            if cost_value <= 0.0:
+                computed = self._estimate_token_cost(
+                    self.model_pricing.get(model_name or ""),
+                    prompt_tokens,
+                    completion_tokens,
+                )
+                if computed is not None:
+                    cost_value = computed
+                    record["cost"] = cost_value
+                    history_updated = True
+            history_rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(str(record.get("timestamp", "-")))),
+                        ft.DataCell(ft.Text(str(model_name or "-"))),
+                        ft.DataCell(ft.Text(str(prompt_tokens))),
+                        ft.DataCell(ft.Text(str(completion_tokens))),
+                        ft.DataCell(ft.Text(str(record.get("total", 0)))),
+                        ft.DataCell(ft.Text(f"${cost_value:.2f}")),
+                    ]
+                )
             )
-            for record in self.usage_history
-        ]
+        if history_updated:
+            self._persist_usage_history()
+            self.total_cost = sum(
+                float(rec.get("cost", 0.0) or 0.0) for rec in self.usage_history
+            )
+            self._persist_total_cost()
+            self.token_usage_cost_total_text.value = f"概算コスト累計: ${self.total_cost:.2f}"
         self.token_usage_history_table = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text("日時")),
@@ -453,17 +482,35 @@ class LocalizeApp:
 
     def _refresh_usage_history_table(self) -> None:
         rows: list[ft.DataRow] = []
-        total_cost = 0.0
+        updated = False
         for record in self.usage_history:
-            cost_value = float(record.get("cost", 0.0))
-            total_cost += cost_value
+            model = str(record.get("model", ""))
+            try:
+                prompt_tokens = int(record.get("prompt", 0) or 0)
+            except Exception:
+                prompt_tokens = 0
+            try:
+                completion_tokens = int(record.get("completion", 0) or 0)
+            except Exception:
+                completion_tokens = 0
+            cost_value = float(record.get("cost", 0.0) or 0.0)
+            if cost_value <= 0.0:
+                computed = self._estimate_token_cost(
+                    self.model_pricing.get(model or ""),
+                    prompt_tokens,
+                    completion_tokens,
+                )
+                if computed is not None:
+                    cost_value = computed
+                    record["cost"] = cost_value
+                    updated = True
             rows.append(
                 ft.DataRow(
                     cells=[
                         ft.DataCell(ft.Text(str(record.get("timestamp", "-")))),
-                        ft.DataCell(ft.Text(str(record.get("model", "-")))),
-                        ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
-                        ft.DataCell(ft.Text(str(record.get("completion", 0)))),
+                        ft.DataCell(ft.Text(str(model or "-"))),
+                        ft.DataCell(ft.Text(str(prompt_tokens))),
+                        ft.DataCell(ft.Text(str(completion_tokens))),
                         ft.DataCell(ft.Text(str(record.get("total", 0)))),
                         ft.DataCell(ft.Text(f"${cost_value:.2f}")),
                     ]
@@ -471,6 +518,14 @@ class LocalizeApp:
             )
         self.token_usage_history_table.rows = rows
         self.token_usage_history_table.update()
+        if updated:
+            self._persist_usage_history()
+            self.total_cost = sum(
+                float(rec.get("cost", 0.0) or 0.0) for rec in self.usage_history
+            )
+            self._persist_total_cost()
+            self.token_usage_cost_total_text.value = f"概算コスト累計: ${self.total_cost:.2f}"
+            self.token_usage_cost_total_text.update()
 
     def on_save_settings(self, e: ft.ControlEvent):
         key = self.api_key_field.value.strip()
@@ -527,24 +582,38 @@ class LocalizeApp:
             self.counter.value = text
             self.counter.update()
 
+    def _estimate_token_cost(
+        self,
+        pricing: dict[str, float] | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> float | None:
+        """概算の料金を返す。料金表が無い場合は None。"""
+        if not pricing:
+            return None
+        prompt = max(0, int(prompt_tokens))
+        completion = max(0, int(completion_tokens))
+        return (
+            pricing.get("input", 0.0) * prompt / 1_000_000
+            + pricing.get("output", 0.0) * completion / 1_000_000
+        )
+
     def _update_token_usage_ui(self, summary: TranslationSummary):
         pricing = self.model_pricing.get(summary.model)
         last_cost_total = 0.0
         if summary.usage_records:
             for prompt, completion, total in summary.usage_records:
-                cost = 0.0
-                if pricing:
-                    cost += pricing["input"] * prompt / 1_000_000
-                    cost += pricing["output"] * completion / 1_000_000
-                last_cost_total += cost
-                self.total_cost += cost
+                cost = self._estimate_token_cost(pricing, prompt, completion)
+                if cost is not None:
+                    last_cost_total += cost
+                    self.total_cost += cost
                 record = {
                     "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     "model": summary.model or "(不明)",
                     "prompt": prompt,
                     "completion": completion,
                     "total": total,
-                    "cost": cost,
+                    "cost": cost if cost is not None else 0.0,
                 }
                 self.usage_history.append(record)
             # keep latest 200 entries to avoid unbounded growth
