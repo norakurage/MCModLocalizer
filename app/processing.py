@@ -392,6 +392,7 @@ class ExtractionResult:
     primary_en_path: Optional[Path]
     mod_maps: Dict[str, Dict[str, str]]
     mod_sources: Dict[str, Path] = field(default_factory=dict)
+    existing_ja_maps: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -421,6 +422,7 @@ def extract_localizations(
         jar_paths = [source_path]
 
     aggregated_maps: Dict[str, Dict[str, str]] = {}
+    existing_lang_maps: Dict[str, Dict[str, str]] = {}
     mod_sources: Dict[str, Path] = {}
     primary_modid: Optional[str] = None
     primary_en_path: Optional[Path] = None
@@ -453,6 +455,7 @@ def extract_localizations(
             existing_ja = ja_maps.get(modid)
             if existing_ja:
                 write_json(mod_dir / "ja_jp.json", existing_ja)
+                existing_lang_maps[modid] = existing_ja
             aggregated_maps[modid] = en_map
             mod_sources[modid] = jar
             if log:
@@ -476,6 +479,7 @@ def extract_localizations(
         primary_en_path=primary_en_path,
         mod_maps=aggregated_maps,
         mod_sources=mod_sources,
+        existing_ja_maps=existing_lang_maps,
     )
 
 
@@ -484,6 +488,7 @@ def translate_localizations(
     model: str,
     in_path: Path,
     out_path: Path,
+    existing_translations: Optional[Dict[str, str]] = None,
     *,
     log: Optional[LogFn] = None,
     progress: Optional[ProgressFn] = None,
@@ -498,6 +503,12 @@ def translate_localizations(
         log(f"[RUN] 出力: {out_path}")
     src: Dict[str, str] = load_json(in_path)
     dst: Dict[str, str] = load_json(out_path)
+    if not dst and existing_translations:
+        dst = dict(existing_translations)
+        if log:
+            log("[INFO] 既存の ja_jp.json が見つかったため差分のみを補完します。")
+    elif existing_translations and log:
+        log("[INFO] 既存の ja_jp.json を差分チェックに利用します。")
     todo: List[Tuple[str, str]] = []
     base_token_maps: Dict[str, Dict[str, str]] = {}
     for k, v in src.items():
@@ -508,6 +519,10 @@ def translate_localizations(
         if base_map:
             base_token_maps[k] = base_map
         todo.append((k, pv))
+    if existing_translations and log:
+        log(
+            f"[INFO] 既存訳 {len(existing_translations)} 件を検出。未訳 {len(todo)} 件を補完します。"
+        )
     batches = list(chunk_pairs(todo))
     total = sum(len(batch) for batch in batches)
     if total == 0:
