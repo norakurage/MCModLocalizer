@@ -293,25 +293,32 @@ def load_json(path: Path) -> Dict[str, str]:
         return json.load(f)
 
 
-MOD_LANG_RE = re.compile(r"^assets/([^/]+)/lang/en_us\.json$")
+MOD_LANG_RE = re.compile(r"^assets/([^/]+)/lang/([a-z0-9_]+)\.json$", re.IGNORECASE)
 
 
-def read_en_us_from_jar(jar_path: Path) -> Dict[str, Dict[str, str]]:
-    """JAR 内の assets/<modid>/lang/en_us.json を全て読み取る。"""
-    out: Dict[str, Dict[str, str]] = {}
+def read_lang_files_from_jar(jar_path: Path) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+    """JAR 内の assets/<modid>/lang/{lang}.json を読み取る（en_us と ja_jp）。"""
+    en_maps: Dict[str, Dict[str, str]] = {}
+    ja_maps: Dict[str, Dict[str, str]] = {}
     with zipfile.ZipFile(jar_path, "r") as zf:
         for name in zf.namelist():
             m = MOD_LANG_RE.match(name)
             if not m:
                 continue
             modid = m.group(1)
+            lang = m.group(2).lower()
             try:
                 with zf.open(name) as f:
                     data = json.loads(f.read().decode("utf-8"))
-                out[modid] = {str(k): str(v) for k, v in data.items()}
             except Exception:
                 pass
-    return out
+            else:
+                normalized = {str(k): str(v) for k, v in data.items()}
+                if lang == "en_us":
+                    en_maps[modid] = normalized
+                elif lang == "ja_jp":
+                    ja_maps[modid] = normalized
+    return en_maps, ja_maps
 
 
 def choose_primary_modid(mod_maps: Dict[str, Dict[str, str]]) -> Tuple[str, Dict[str, str]]:
@@ -354,7 +361,8 @@ def extract_localizations(
     log: Optional[LogFn] = None,
     progress: Optional[ProgressFn] = None,
 ) -> ExtractionResult:
-    mod_maps = read_en_us_from_jar(jar_path)
+    en_maps, ja_maps = read_lang_files_from_jar(jar_path)
+    mod_maps = en_maps
     if not mod_maps:
         raise ValueError("JAR 内に assets/<modid>/lang/en_us.json が見つかりませんでした。")
     if len(mod_maps) > 1 and log:
@@ -375,6 +383,12 @@ def extract_localizations(
             log(f"[OK] 抽出: {modid} -> {en_path}")
         if primary_modid == modid:
             primary_en_path = en_path
+        ja_map = ja_maps.get(modid)
+        if ja_map:
+            ja_path = mod_dir / "ja_jp.json"
+            write_json(ja_path, ja_map)
+            if log:
+                log(f"[INFO] 既存の ja_jp.json を取り込みました: {ja_path} ({len(ja_map)} keys)")
         done += 1
         if progress:
             progress(done / total, f"{done}/{total}")

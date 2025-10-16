@@ -619,6 +619,16 @@ $notifier.Show($toast)
             display = jar_path if jar_path else "(未指定)"
             self._append_log(f"[ERROR] Mod JAR が見つかりません: {display}")
             return
+        jar_targets: list[Path]
+        if jar_path.is_dir():
+            jar_targets = sorted(
+                [p for p in jar_path.iterdir() if p.is_file() and p.suffix.lower() == ".jar"]
+            )
+            if not jar_targets:
+                self._append_log(f"[ERROR] 指定フォルダに Mod JAR が見つかりません: {jar_path}")
+                return
+        else:
+            jar_targets = [jar_path]
         if out_dir is None:
             self._append_log("[ERROR] 出力フォルダを指定してください。")
             return
@@ -646,18 +656,31 @@ $notifier.Show($toast)
                 temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
                 temp_dir_path = Path(temp_dir_obj.name)
                 self._append_log(f"[INFO] 一時作業フォルダ: {temp_dir_path}")
-                self._append_log(f"[RUN] 抽出: {jar_path}")
-                result: ExtractionResult = extract_localizations(
-                    jar_path,
-                    temp_dir_path,
-                    log=self._append_log,
-                    progress=self._set_progress,
-                )
                 targets: list[tuple[str, Path]] = []
-                for modid in result.mod_maps.keys():
-                    en_path = temp_dir_path / modid / "en_us.json"
-                    if en_path.exists():
-                        targets.append((modid, en_path))
+                jar_count = len(jar_targets)
+                for idx, jar_file in enumerate(jar_targets, start=1):
+                    if jar_count > 1:
+                        self._append_log(f"[RUN] 抽出 {idx}/{jar_count}: {jar_file}")
+                    else:
+                        self._append_log(f"[RUN] 抽出: {jar_file}")
+                    jar_out_dir = temp_dir_path
+                    if jar_count > 1:
+                        jar_out_dir = temp_dir_path / jar_file.stem
+                        jar_out_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        result: ExtractionResult = extract_localizations(
+                            jar_file,
+                            jar_out_dir,
+                            log=self._append_log,
+                            progress=self._set_progress,
+                        )
+                    except Exception as ex:
+                        self._append_log(f"[WARN] 抽出に失敗したためスキップします ({jar_file}): {repr(ex)}")
+                        continue
+                    for modid in result.mod_maps.keys():
+                        en_path = jar_out_dir / modid / "en_us.json"
+                        if en_path.exists():
+                            targets.append((modid, en_path))
                 if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
                     summary = self._translate_targets(targets, jar_path, temp_dir_path, out_dir)
