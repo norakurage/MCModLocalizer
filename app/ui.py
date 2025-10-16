@@ -52,9 +52,9 @@ class LocalizeApp:
         self.K_API = "openai_api_key"
         self.K_MODEL = "openai_model"
         self.K_SAVE_MODE = "save_mode"  # "keyring" or "local"
-        self.K_DIR_JAR = "dir_mod_jar"
+        self.K_DIR_MODS = "dir_mods_root"
         self.K_DIR_OUTPUT = "dir_output_pack"
-        self.K_LAST_JAR_PATH = "last_mod_jar_path"
+        self.K_LAST_MODS_PATH = "last_mods_dir_path"
         self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
         self.K_USAGE_HISTORY = "token_usage_history"
         self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
@@ -82,12 +82,12 @@ class LocalizeApp:
         self.progress = ft.ProgressBar(width=420, value=0)
         self.counter = ft.Text("待機中")
         # -------- 抽出タブ UI --------
-        self.mod_jar_path = ft.TextField(
-            label="Mod JAR（必須）",
+        self.mods_dir_path = ft.TextField(
+            label="Mods フォルダ（必須）",
             dense=True,
             expand=True,
             read_only=True,
-            value=self._load_value(self.K_LAST_JAR_PATH) or "",
+            value=self._load_value(self.K_LAST_MODS_PATH) or "",
         )
         self.output_dir = ft.TextField(
             label="出力フォルダ（リソースパック保存先）",
@@ -96,11 +96,11 @@ class LocalizeApp:
             read_only=True,
             value=self._load_value(self.K_LAST_OUTPUT_PATH) or "",
         )
-        self.fp_jar = ft.FilePicker(on_result=self._on_pick_jar)
+        self.fp_mods = ft.FilePicker(on_result=self._on_pick_mods_dir)
         self.fp_dir = ft.FilePicker(on_result=self._on_pick_dir)
-        self.page.overlay.extend([self.fp_jar, self.fp_dir])
-        pick_jar_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="Mod JAR を選択",
-                                     on_click=self._open_jar_picker)
+        self.page.overlay.extend([self.fp_mods, self.fp_dir])
+        pick_mods_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="Mods フォルダを選択",
+                                      on_click=self._open_mods_picker)
         pick_dir_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="出力フォルダを選択",
                                      on_click=self._open_output_dir_picker)
         self.btn_extract = ft.ElevatedButton("抽出 / リソースパック生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
@@ -108,7 +108,7 @@ class LocalizeApp:
         extract_tab = ft.Column(
             controls=[
                 ft.Text("ステップ: JAR から en_us.json を抽出し、ja_jp.json まで自動生成します。", weight=ft.FontWeight.BOLD),
-                ft.Row([self.mod_jar_path, pick_jar_btn], alignment=ft.MainAxisAlignment.START),
+                ft.Row([self.mods_dir_path, pick_mods_btn], alignment=ft.MainAxisAlignment.START),
                 ft.Row([self.output_dir, pick_dir_btn], alignment=ft.MainAxisAlignment.START),
                 ft.Row([self.btn_extract, self.btn_stop, self.progress, self.counter], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self.log,
@@ -248,14 +248,14 @@ class LocalizeApp:
             expand=True,
         )
         page.add(self.tabs)
-        self._append_log("準備完了。JAR と出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
+        self._append_log("準備完了。Mods フォルダと出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
 
     # ------------------------------
     # FilePicker launchers
     # ------------------------------
-    def _open_jar_picker(self, e: ft.ControlEvent):
-        init_dir = self._get_initial_directory(self.K_DIR_JAR)
-        self.fp_jar.pick_files(initial_directory=init_dir, allowed_extensions=["jar"], allow_multiple=False)
+    def _open_mods_picker(self, e: ft.ControlEvent):
+        init_dir = self._get_initial_directory(self.K_DIR_MODS)
+        self.fp_mods.get_directory_path(initial_directory=init_dir)
 
     def _open_output_dir_picker(self, e: ft.ControlEvent):
         init_dir = self._get_initial_directory(self.K_DIR_OUTPUT)
@@ -264,13 +264,13 @@ class LocalizeApp:
     # ------------------------------
     # FilePicker handlers
     # ------------------------------
-    def _on_pick_jar(self, e: ft.FilePickerResultEvent):
-        if e.files:
-            selected = Path(e.files[0].path)
-            self.mod_jar_path.value = str(selected)
-            self.mod_jar_path.update()
-            self._save_value(self.K_LAST_JAR_PATH, str(selected))
-            self._remember_dir(self.K_DIR_JAR, selected)
+    def _on_pick_mods_dir(self, e: ft.FilePickerResultEvent):
+        if e.path:
+            selected = Path(e.path)
+            self.mods_dir_path.value = str(selected)
+            self.mods_dir_path.update()
+            self._save_value(self.K_LAST_MODS_PATH, str(selected))
+            self._remember_dir(self.K_DIR_MODS, selected)
             self._auto_set_output_dir(selected)
 
     def _on_pick_dir(self, e: ft.FilePickerResultEvent):
@@ -302,16 +302,19 @@ class LocalizeApp:
             dir_path = dir_path.absolute()
         self._save_value(key, str(dir_path))
 
-    def _auto_set_output_dir(self, jar_path: Path):
+    def _auto_set_output_dir(self, source_path: Path):
         try:
-            jar_path = jar_path.resolve()
+            source_path = source_path.resolve()
         except Exception:
-            jar_path = jar_path.absolute()
+            source_path = source_path.absolute()
         target_root: Path | None = None
-        for parent in jar_path.parents:
-            if parent.name.lower() == "mods":
-                target_root = parent.parent
-                break
+        if source_path.is_dir() and source_path.name.lower() == "mods":
+            target_root = source_path.parent
+        else:
+            for parent in source_path.parents:
+                if parent.name.lower() == "mods":
+                    target_root = parent.parent
+                    break
         if not target_root:
             return
         candidate_dir: Path | None = None
@@ -611,13 +614,13 @@ $notifier.Show($toast)
     # 抽出フロー
     # ------------------------------
     def on_extract(self, e: ft.ControlEvent):
-        jar_path_value = self.mod_jar_path.value.strip()
-        jar_path = Path(jar_path_value) if jar_path_value else None
+        mods_dir_value = self.mods_dir_path.value.strip()
+        mods_dir = Path(mods_dir_value) if mods_dir_value else None
         out_dir_value = self.output_dir.value.strip()
         out_dir = Path(out_dir_value) if out_dir_value else None
-        if not jar_path or not jar_path.exists():
-            display = jar_path if jar_path else "(未指定)"
-            self._append_log(f"[ERROR] Mod JAR が見つかりません: {display}")
+        if not mods_dir or not mods_dir.exists() or not mods_dir.is_dir():
+            display = mods_dir if mods_dir else "(未指定)"
+            self._append_log(f"[ERROR] Mods フォルダが見つかりません: {display}")
             return
         if out_dir is None:
             self._append_log("[ERROR] 出力フォルダを指定してください。")
@@ -629,9 +632,9 @@ $notifier.Show($toast)
             except Exception as ex:
                 self._append_log(f"[ERROR] 出力フォルダを作成できません: {repr(ex)}")
                 return
-        self._remember_dir(self.K_DIR_JAR, jar_path)
+        self._remember_dir(self.K_DIR_MODS, mods_dir)
         self._remember_dir(self.K_DIR_OUTPUT, out_dir)
-        self._save_value(self.K_LAST_JAR_PATH, str(jar_path))
+        self._save_value(self.K_LAST_MODS_PATH, str(mods_dir))
         self._save_value(self.K_LAST_OUTPUT_PATH, str(out_dir))
         self.btn_extract.disabled = True
         self.btn_extract.update()
@@ -646,9 +649,9 @@ $notifier.Show($toast)
                 temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
                 temp_dir_path = Path(temp_dir_obj.name)
                 self._append_log(f"[INFO] 一時作業フォルダ: {temp_dir_path}")
-                self._append_log(f"[RUN] 抽出: {jar_path}")
+                self._append_log(f"[RUN] 抽出: {mods_dir}")
                 result: ExtractionResult = extract_localizations(
-                    jar_path,
+                    mods_dir,
                     temp_dir_path,
                     log=self._append_log,
                     progress=self._set_progress,
@@ -660,7 +663,7 @@ $notifier.Show($toast)
                         targets.append((modid, en_path))
                 if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
-                    summary = self._translate_targets(targets, jar_path, temp_dir_path, out_dir)
+                    summary = self._translate_targets(targets, mods_dir, temp_dir_path, out_dir)
                     self._update_token_usage_ui(summary)
                     if summary.aborted:
                         toast_message = "翻訳が停止されました。"
@@ -700,7 +703,7 @@ $notifier.Show($toast)
     def _translate_targets(
         self,
         targets: list[tuple[str, Path]],
-        jar_path: Path,
+        source_path: Path,
         temp_dir: Path,
         output_dir: Path,
     ) -> TranslationSummary:
@@ -798,7 +801,7 @@ $notifier.Show($toast)
             self.btn_stop.update()
         if produced and not aborted:
             try:
-                pack_dir = self._generate_resource_pack(jar_path, temp_dir, output_dir, produced)
+                pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
                 if pack_dir:
                     pack_dir_path = pack_dir
                     self._append_log(f"[OK] リソースパックを更新しました: {pack_dir}")
@@ -834,7 +837,7 @@ $notifier.Show($toast)
 
     def _generate_resource_pack(
         self,
-        jar_path: Path,
+        source_path: Path,
         temp_dir: Path,
         output_dir: Path,
         produced: list[tuple[str, Path]],
@@ -842,8 +845,13 @@ $notifier.Show($toast)
         if not produced:
             return None
         self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
-        primary_modid = produced[0][0] if produced and produced[0][0] else jar_path.stem
-        base_name = primary_modid or (jar_path.stem or "ja_resource")
+        primary_modid = produced[0][0] if produced and produced[0][0] else ""
+        if not primary_modid:
+            if source_path.is_dir():
+                primary_modid = source_path.name
+            else:
+                primary_modid = source_path.stem
+        base_name = primary_modid or "ja_resource"
         pack_name = f"{base_name}_ja_resource"
         pack_dir = output_dir / pack_name
         preserved_pack_png: bytes | None = None

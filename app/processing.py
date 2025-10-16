@@ -293,18 +293,21 @@ def load_json(path: Path) -> Dict[str, str]:
         return json.load(f)
 
 
-MOD_LANG_RE = re.compile(r"^assets/([^/]+)/lang/en_us\.json$")
+MOD_LANG_PATTERN = re.compile(r"^assets/([^/]+)/lang/([a-z0-9_\-]+)\.json$", re.IGNORECASE)
 
 
-def read_en_us_from_jar(jar_path: Path) -> Dict[str, Dict[str, str]]:
-    """JAR 内の assets/<modid>/lang/en_us.json を全て読み取る。"""
+def read_lang_from_jar(jar_path: Path, locale: str) -> Dict[str, Dict[str, str]]:
+    """JAR 内の assets/<modid>/lang/<locale>.json を全て読み取る。"""
+    target_locale = locale.lower()
     out: Dict[str, Dict[str, str]] = {}
     with zipfile.ZipFile(jar_path, "r") as zf:
         for name in zf.namelist():
-            m = MOD_LANG_RE.match(name)
+            m = MOD_LANG_PATTERN.match(name)
             if not m:
                 continue
-            modid = m.group(1)
+            modid, lang = m.group(1), m.group(2).lower()
+            if lang != target_locale:
+                continue
             try:
                 with zf.open(name) as f:
                     data = json.loads(f.read().decode("utf-8"))
@@ -312,6 +315,10 @@ def read_en_us_from_jar(jar_path: Path) -> Dict[str, Dict[str, str]]:
             except Exception:
                 pass
     return out
+
+
+def read_en_us_from_jar(jar_path: Path) -> Dict[str, Dict[str, str]]:
+    return read_lang_from_jar(jar_path, "en_us")
 
 
 def choose_primary_modid(mod_maps: Dict[str, Dict[str, str]]) -> Tuple[str, Dict[str, str]]:
@@ -333,6 +340,7 @@ class ExtractionResult:
     primary_modid: Optional[str]
     primary_en_path: Optional[Path]
     mod_maps: Dict[str, Dict[str, str]]
+    mod_sources: Dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass
@@ -348,41 +356,76 @@ class TranslationResult:
 
 
 def extract_localizations(
-    jar_path: Path,
+    source_path: Path,
     out_dir: Path,
     *,
     log: Optional[LogFn] = None,
     progress: Optional[ProgressFn] = None,
 ) -> ExtractionResult:
-    mod_maps = read_en_us_from_jar(jar_path)
-    if not mod_maps:
-        raise ValueError("JAR 内に assets/<modid>/lang/en_us.json が見つかりませんでした。")
-    if len(mod_maps) > 1 and log:
-        mods = ", ".join(f"{m}({len(d)} keys)" for m, d in mod_maps.items())
-        log(f"[WARN] 複数の namespace が見つかりました -> {mods}。全て出力します。")
-    total = len(mod_maps)
-    done = 0
+    if source_path.is_dir():
+        jar_paths = sorted(p for p in source_path.iterdir() if p.is_file() and p.suffix.lower() == ".jar")
+        if not jar_paths:
+            raise ValueError("指定されたフォルダ内に Mod の JAR が見つかりませんでした。")
+    else:
+        jar_paths = [source_path]
+
+    aggregated_maps: Dict[str, Dict[str, str]] = {}
+    mod_sources: Dict[str, Path] = {}
     primary_modid: Optional[str] = None
     primary_en_path: Optional[Path] = None
     primary_map: Optional[Dict[str, str]] = None
-    if mod_maps:
-        primary_modid, primary_map = choose_primary_modid(mod_maps)
-    for modid, en_map in mod_maps.items():
-        mod_dir = out_dir / modid
-        en_path = mod_dir / "en_us.json"
-        write_json(en_path, en_map)
-        if log:
-            log(f"[OK] 抽出: {modid} -> {en_path}")
-        if primary_modid == modid:
-            primary_en_path = en_path
-        done += 1
-        if progress:
-            progress(done / total, f"{done}/{total}")
+
+    total_mods = 0
+    per_jar_maps: List[Tuple[Path, Dict[str, Dict[str, str]]]] = []
+    for jar in jar_paths:
+        mod_maps = read_en_us_from_jar(jar)
+        if not mod_maps:
+            if log:
+                log(f"[WARN] en_us.json が見つからないためスキップしました: {jar}")
+            continue
+        per_jar_maps.append((jar, mod_maps))
+        total_mods += len(mod_maps)
+
+    if not per_jar_maps:
+        raise ValueError("Mod の en_us.json が 1 件も見つかりませんでした。")
+
+    done = 0
+    for jar, mod_maps in per_jar_maps:
+        if len(mod_maps) > 1 and log:
+            mods = ", ".join(f"{m}({len(d)} keys)" for m, d in mod_maps.items())
+            log(f"[WARN] 複数 namespace を含む Mod を検出しました ({jar}): {mods}。全て処理します。")
+        ja_maps = read_lang_from_jar(jar, "ja_jp")
+        for modid, en_map in mod_maps.items():
+            mod_dir = out_dir / modid
+            en_path = mod_dir / "en_us.json"
+            write_json(en_path, en_map)
+            existing_ja = ja_maps.get(modid)
+            if existing_ja:
+                write_json(mod_dir / "ja_jp.json", existing_ja)
+            aggregated_maps[modid] = en_map
+            mod_sources[modid] = jar
+            if log:
+                note = " (既存の ja_jp を読み込み)" if existing_ja else ""
+                log(f"[OK] 抽出: {modid} -> {en_path}{note}")
+            if primary_modid is None or (len(en_map) > len(primary_map or {})):
+                primary_modid = modid
+                primary_map = en_map
+                primary_en_path = en_path
+            done += 1
+            if progress and total_mods:
+                progress(done / total_mods, f"{done}/{total_mods}")
+
     if log and primary_modid and primary_map is not None:
-        log(f"[INFO] modid: {primary_modid}（キー数: {len(primary_map)}）")
-    if progress:
-        progress(1.0, f"{total}/{total}")
-    return ExtractionResult(primary_modid=primary_modid, primary_en_path=primary_en_path, mod_maps=mod_maps)
+        log(f"[INFO] 最大キー数の Mod: {primary_modid}（キー数: {len(primary_map)}）")
+    if progress and total_mods:
+        progress(1.0, f"{total_mods}/{total_mods}")
+
+    return ExtractionResult(
+        primary_modid=primary_modid,
+        primary_en_path=primary_en_path,
+        mod_maps=aggregated_maps,
+        mod_sources=mod_sources,
+    )
 
 
 def translate_localizations(
