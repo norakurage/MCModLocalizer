@@ -768,6 +768,7 @@ $notifier.Show($toast)
         total_entries = 0
         translated_entries = 0
         pack_dir_path: Path | None = None
+        pack_generated_once = False
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_token_count = 0
@@ -803,6 +804,30 @@ $notifier.Show($toast)
                     elif event == "end":
                         self._stream_end()
 
+                pack_lang_path = self._find_existing_pack_translation(output_dir, modid)
+                if pack_lang_path and pack_lang_path.exists():
+                    try:
+                        shutil.copy2(pack_lang_path, out_path)
+                        produced.append((modid, out_path))
+                        self._append_log(
+                            f"[INFO] 既存のリソースパックから ja_jp.json を再利用します: {pack_lang_path}"
+                        )
+                        self._set_progress(1.0, f"{modid}: 既存訳を利用")
+                        pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
+                        if pack_dir:
+                            pack_dir_path = pack_dir
+                            pack_generated_once = True
+                            self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
+                        continue
+                    except Exception as reuse_error:
+                        try:
+                            out_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        self._append_log(
+                            f"[WARN] 既存訳の再利用に失敗したため翻訳を実行します ({modid}): {repr(reuse_error)}"
+                        )
+
                 try:
                     result = translate_localizations(
                         api_key=api_key,
@@ -832,6 +857,11 @@ $notifier.Show($toast)
                     if out_path.exists():
                         produced.append((modid, out_path))
                     self._append_log(f"[OK] ja_jp.json を作成しました: {out_path}")
+                    pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
+                    if pack_dir:
+                        pack_dir_path = pack_dir
+                        pack_generated_once = True
+                        self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
                 except Exception as ex:
                     had_error = True
                     self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
@@ -842,7 +872,7 @@ $notifier.Show($toast)
             self.stop_event.clear()
             self.btn_stop.disabled = True
             self.btn_stop.update()
-        if produced and not aborted:
+        if produced and not aborted and not pack_generated_once:
             try:
                 pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
                 if pack_dir:
@@ -877,6 +907,32 @@ $notifier.Show($toast)
     def on_stop(self, e: ft.ControlEvent):
         self.stop_event.set()
         self._append_log("[INFO] 停止要求を送信しました。現在のバッチ終了後に停止します。")
+
+    def _find_existing_pack_translation(self, output_dir: Path, modid: str) -> Path | None:
+        def _check_pack_dir(base: Path) -> Path | None:
+            candidate = base / "assets" / modid / "lang" / "ja_jp.json"
+            if candidate.exists():
+                return candidate
+            return None
+
+        if not output_dir.exists():
+            return None
+
+        direct = _check_pack_dir(output_dir)
+        if direct:
+            return direct
+
+        try:
+            for child in output_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                found = _check_pack_dir(child)
+                if found:
+                    return found
+        except Exception:
+            return None
+
+        return None
 
     def _generate_resource_pack(
         self,
