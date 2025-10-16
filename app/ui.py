@@ -646,41 +646,171 @@ $notifier.Show($toast)
                 temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
                 temp_dir_path = Path(temp_dir_obj.name)
                 self._append_log(f"[INFO] 一時作業フォルダ: {temp_dir_path}")
-                self._append_log(f"[RUN] 抽出: {jar_path}")
-                result: ExtractionResult = extract_localizations(
-                    jar_path,
-                    temp_dir_path,
-                    log=self._append_log,
-                    progress=self._set_progress,
-                )
-                targets: list[tuple[str, Path]] = []
-                for modid in result.mod_maps.keys():
-                    en_path = temp_dir_path / modid / "en_us.json"
-                    if en_path.exists():
-                        targets.append((modid, en_path))
-                if targets:
-                    self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
-                    summary = self._translate_targets(targets, jar_path, temp_dir_path, out_dir)
-                    self._update_token_usage_ui(summary)
-                    if summary.aborted:
-                        toast_message = "翻訳が停止されました。"
+
+                jar_root: Path | None = None
+                jar_candidates: list[Path] = []
+                if jar_path.is_dir():
+                    jar_root = jar_path
+                    jar_candidates = []
+                elif jar_path.is_file():
+                    if jar_path.suffix.lower() != ".jar":
+                        self._append_log(f"[ERROR] JAR 以外のファイルは処理できません: {jar_path}")
+                        toast_message = "Mod フォルダまたは JAR ファイルを指定してください。"
                         toast_is_error = True
-                    elif summary.had_error:
-                        toast_message = "翻訳処理でエラーが発生しました。ログを確認してください。"
-                        toast_is_error = True
-                    elif summary.translated_mods == 0:
-                        toast_message = "翻訳対象の ja_jp.json は生成されませんでした。"
-                    else:
-                        mod_part = f"{summary.translated_mods}/{summary.total_mods} Mod"
-                        if summary.total_entries:
-                            entry_part = f"、{summary.translated_entries}/{summary.total_entries} 件"
-                        else:
-                            entry_part = ""
-                        toast_message = f"翻訳が完了しました ({mod_part}{entry_part})。"
+                        return
+                    jar_root = jar_path.parent
+                    jar_candidates = []
                 else:
+                    self._append_log(f"[ERROR] 指定されたパスはファイル/フォルダではありません: {jar_path}")
+                    toast_message = "Mod フォルダまたは JAR ファイルを指定してください。"
+                    toast_is_error = True
+                    return
+
+                if jar_root:
+                    try:
+                        jar_candidates = sorted(
+                            (p for p in jar_root.rglob("*.jar") if p.is_file()),
+                            key=lambda p: str(p).lower(),
+                        )
+                    except Exception:
+                        jar_candidates = sorted(
+                            [p for p in jar_root.rglob("*.jar") if p.is_file()],
+                            key=lambda p: str(p).lower(),
+                        )
+                else:
+                    jar_candidates = []
+
+                if not jar_candidates:
+                    self._append_log("[ERROR] 翻訳対象の Mod JAR が見つかりません。")
+                    toast_message = "翻訳対象の Mod JAR が見つかりませんでした。"
+                    toast_is_error = True
+                    self._set_progress(0.0, "待機中")
+                    return
+
+                unique_candidates: list[Path] = []
+                seen: set[str] = set()
+                for cand in jar_candidates:
+                    try:
+                        key = str(cand.resolve())
+                    except Exception:
+                        key = str(cand.absolute())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    unique_candidates.append(cand)
+                jar_candidates = unique_candidates
+
+                self._append_log(
+                    f"[INFO] 翻訳対象の Mod JAR を {len(jar_candidates)} 件検出しました: {jar_root}"
+                )
+
+                combined_summary = TranslationSummary(
+                    translated_mods=0,
+                    total_mods=0,
+                    translated_entries=0,
+                    total_entries=0,
+                    aborted=False,
+                    had_error=False,
+                    pack_dir=None,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    model="",
+                    usage_records=[],
+                )
+                any_targets_found = False
+
+                for jar_idx, current_jar in enumerate(jar_candidates, start=1):
+                    if self.stop_event.is_set():
+                        combined_summary.aborted = True
+                        self._append_log("[WARN] ユーザーによって翻訳が停止されました。")
+                        break
+                    try:
+                        jar_temp_dir = temp_dir_path / f"mod_{jar_idx:03d}_{current_jar.stem}"
+                        jar_temp_dir.mkdir(parents=True, exist_ok=True)
+                        self._append_log(
+                            f"[RUN] 抽出 {jar_idx}/{len(jar_candidates)}: {current_jar}"
+                        )
+
+                        def _extract_progress(ratio: float, text: str, *, _jar=current_jar.name):
+                            label = text.strip()
+                            label = f"{_jar}: {label}" if label else _jar
+                            self._set_progress(ratio, f"抽出 {jar_idx}/{len(jar_candidates)} {label}")
+
+                        result: ExtractionResult = extract_localizations(
+                            current_jar,
+                            jar_temp_dir,
+                            log=self._append_log,
+                            progress=_extract_progress,
+                        )
+                        targets: list[tuple[str, Path]] = []
+                        for modid in result.mod_maps.keys():
+                            en_path = jar_temp_dir / modid / "en_us.json"
+                            if en_path.exists():
+                                targets.append((modid, en_path))
+                        if not targets:
+                            self._append_log(
+                                f"[WARN] 翻訳対象となる en_us.json が見つかりませんでした: {current_jar}"
+                            )
+                            continue
+                        any_targets_found = True
+                        self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
+                        summary = self._translate_targets(
+                            targets,
+                            current_jar,
+                            jar_temp_dir,
+                            out_dir,
+                        )
+                        combined_summary.translated_mods += summary.translated_mods
+                        combined_summary.total_mods += summary.total_mods
+                        combined_summary.translated_entries += summary.translated_entries
+                        combined_summary.total_entries += summary.total_entries
+                        combined_summary.prompt_tokens += summary.prompt_tokens
+                        combined_summary.completion_tokens += summary.completion_tokens
+                        combined_summary.total_tokens += summary.total_tokens
+                        combined_summary.usage_records.extend(summary.usage_records)
+                        if not combined_summary.model and summary.model:
+                            combined_summary.model = summary.model
+                        if summary.model and summary.model != combined_summary.model:
+                            combined_summary.model = summary.model
+                        combined_summary.aborted = combined_summary.aborted or summary.aborted
+                        combined_summary.had_error = combined_summary.had_error or summary.had_error
+                        if summary.aborted or summary.had_error:
+                            break
+                    except Exception as inner_ex:
+                        combined_summary.had_error = True
+                        self._append_log(
+                            f"[ERROR] {current_jar} の処理中に例外が発生しました: {repr(inner_ex)}"
+                        )
+                        self._append_log(traceback.format_exc())
+                        toast_is_error = True
+                        toast_message = "翻訳処理でエラーが発生しました。ログを確認してください。"
+                        break
+
+                self._update_token_usage_ui(combined_summary)
+
+                if combined_summary.aborted:
+                    toast_message = "翻訳が停止されました。"
+                    toast_is_error = True
+                elif combined_summary.had_error:
+                    toast_message = "翻訳処理でエラーが発生しました。ログを確認してください。"
+                    toast_is_error = True
+                elif not any_targets_found:
                     self._set_progress(1.0, "抽出完了")
                     self._append_log("[WARN] 翻訳対象となる en_us.json が見つかりませんでした。")
                     toast_message = "抽出完了 (翻訳対象なし)。"
+                elif combined_summary.translated_mods == 0:
+                    toast_message = "翻訳対象の ja_jp.json は生成されませんでした。"
+                else:
+                    mod_part = f"{combined_summary.translated_mods}/{combined_summary.total_mods} Mod"
+                    if combined_summary.total_entries:
+                        entry_part = (
+                            f"、{combined_summary.translated_entries}/{combined_summary.total_entries} 件"
+                        )
+                    else:
+                        entry_part = ""
+                    toast_message = f"翻訳が完了しました ({mod_part}{entry_part})。"
+                self._set_progress(1.0, "完了")
             except Exception as ex:
                 self._append_log("[ERROR] 抽出処理で例外: " + repr(ex))
                 self._append_log(traceback.format_exc())
