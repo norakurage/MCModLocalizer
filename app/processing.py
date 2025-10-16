@@ -32,13 +32,13 @@ Minecraft の Mod 用テキスト（ゲーム内のUI/メッセージ/アイテ�
 - バニラ Minecraft の公式日本語名が既に存在する語は尊重し、勝手に別訳へ置き換えない
 - 技術語は日本のマイクラ文脈で一般的な用語に統一（例: “Stack”→“スタック”、ただし固有名は維持）
 - 改行や \\n は原文通り保持
-- 返答は必ず JSON（キー:値のオブジェクト）で返す
+- 返答は必ず JSON 配列（各要素が翻訳テキスト）で返す
 """
 
 USER_TEMPLATE = """以下の items は { \"key\":..., \"value\":... } の配列です。
-出力は **単一の JSON オブジェクトのみ** とし、構造は次の通りです。
-- 各 item.key をそのままキーにする（文字列を一切変更しない）
-- 値は item.value の日本語訳（保護トークン ‹Tn› は原文どおりそのまま残す）
+出力は **単一の JSON 配列のみ** とし、構造は次の通りです。
+- 配列の要素数は items と同じにする
+- 配列の i 番目の要素は items[i].value の日本語訳とする（保護トークン ‹Tn› は原文どおりそのまま残す）
 【入力例】
 items:
 [
@@ -46,10 +46,10 @@ items:
   {\"key\":\"message.example.tips\",\"value\":\"Press ‹T0› to open the menu.\"}
 ]
 【出力例】（この形式以外は出力しない）
-{
-  \"block.example.copper_block\": \"銅のブロック\",
-  \"message.example.tips\": \"メニューを開くには ‹T0› を押します。\"
-}
+[
+  \"銅のブロック\",
+  \"メニューを開くには ‹T0› を押します。\"
+]
 items:
 <<PAYLOAD>>
 """
@@ -166,22 +166,21 @@ def translate_batch(
     user_text = USER_TEMPLATE.replace("<<PAYLOAD>>", payload)
     expected_keys = [it["key"] for it in items]
     unique_keys = list(dict.fromkeys(expected_keys))
-    if not unique_keys:
+    if not expected_keys:
         return {}, UsageStats()
-    schema_props = {k: {"type": "string"} for k in unique_keys}
+    expected_len = len(expected_keys)
     response_format_schema = {
         "type": "json_schema",
         "json_schema": {
-            "name": "translation_map",
+            "name": "translation_list",
             "schema": {
-                "type": "object",
-                "properties": schema_props,
-                "required": unique_keys,
-                "additionalProperties": False,
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": expected_len,
+                "maxItems": expected_len,
             },
         },
     }
-    expected_key_set = set(unique_keys)
     last_raw: str = ""
 
     def _extract_text(resp) -> str:
@@ -204,33 +203,35 @@ def translate_batch(
                                 out_parts.append(json.dumps(j, ensure_ascii=False))
         return "".join(out_parts)
 
-    def _parse_any(out: str) -> Dict[str, str]:
+    def _parse_list(out: str) -> List[str]:
         try:
             obj = json.loads(out)
-            if isinstance(obj, dict):
-                return {str(k): str(v) for k, v in obj.items()}
             if isinstance(obj, list):
-                m: Dict[str, str] = {}
-                for r in obj:
-                    if isinstance(r, dict) and "key" in r:
-                        val = r.get("ja") or r.get("value_ja") or r.get("value") or ""
-                        if val:
-                            m[str(r["key"])] = str(val)
-                if m:
-                    return m
+                return [str(v) for v in obj]
+            if isinstance(obj, dict):
+                ordered: List[str] = []
+                for key in unique_keys:
+                    if key in obj:
+                        ordered.append(str(obj[key]))
+                if ordered:
+                    return ordered
         except Exception:
             pass
-        m = re.search(r"\{.*\}", out or "", re.S)
+        m = re.search(r"\[.*\]", out or "", re.S)
         if m:
             try:
                 obj = json.loads(m.group(0))
-                if isinstance(obj, dict):
-                    return {str(k): str(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [str(v) for v in obj]
             except Exception:
                 pass
-        return {}
+        if out:
+            lines = [line.strip() for line in out.splitlines() if line.strip()]
+            if len(lines) >= expected_len:
+                return lines[:expected_len]
+        return []
 
-    def _call_responses(with_response_format: bool, extra_note: str = "") -> Tuple[Dict[str, str], UsageStats]:
+    def _call_responses(with_response_format: bool, extra_note: str = "") -> Tuple[List[str], UsageStats]:
         nonlocal last_raw
         args = dict(
             model=model,
@@ -270,16 +271,16 @@ def translate_batch(
             if with_response_format:
                 return _call_responses(
                     False,
-                    extra_note + "\n出力は必ず『単一の JSON オブジェクト（item.key→日本語訳）』のみで返してください。"
+                    extra_note + "\n出力は必ず『単一の JSON 配列（順番どおりの日本語訳）』のみで返してください。"
                 )
             raise
         usage = _usage_from_response(resp)
         if not out:
             out = _extract_text(resp)
         last_raw = out or ""
-        return _parse_any(out), usage
+        return _parse_list(out), usage
 
-    def _call_chat(extra_note: str = "") -> Tuple[Dict[str, str], UsageStats]:
+    def _call_chat(extra_note: str = "") -> Tuple[List[str], UsageStats]:
         nonlocal last_raw
         messages = [
             {"role": "system", "content": system_instructions + extra_note},
@@ -288,7 +289,7 @@ def translate_batch(
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
-            response_format={"type": "json_object"},
+            response_format=response_format_schema,
         )
         usage = _usage_from_response(resp)
         content = ""
@@ -296,27 +297,19 @@ def translate_batch(
             msg = resp.choices[0].message
             content = getattr(msg, "content", None) or ""
         last_raw = content or ""
-        return _parse_any(content or ""), usage
+        return _parse_list(content or ""), usage
 
-    data, usage = _call_responses(True)
-    inter = expected_key_set.intersection(data.keys())
-    if len(inter) < len(expected_key_set):
-        note = ("\n出力は次の形式のみ：{<item.key>: <日本語訳>}。キー名 'key' や 'value' を出力キーとして使わないこと。余計な文字や説明は一切書かないこと。")
-        chat_data, chat_usage = _call_chat(note)
+    data_list, usage = _call_responses(True)
+    if len(data_list) < expected_len:
+        note = ("\n出力は次の形式のみ：[<訳1>, <訳2>, ...]（items と同じ順序・要素数）。余計な文字や説明は一切書かないこと。")
+        chat_list, chat_usage = _call_chat(note)
         usage.add(chat_usage)
-        data = chat_data
-        inter = expected_key_set.intersection(data.keys())
-    if len(inter) < len(expected_key_set):
-        missing = [k for k in unique_keys if not data.get(k)]
-        if missing and _retry_depth < 2:
-            seen: set[str] = set()
-            subset_items: List[Dict[str, str]] = []
-            for it in items:
-                raw_key = it.get("key")
-                key = str(raw_key)
-                if key in missing and key not in seen:
-                    subset_items.append(it)
-                    seen.add(key)
+        data_list = chat_list
+    if len(data_list) < expected_len:
+        missing_count = expected_len - len(data_list)
+        if missing_count and _retry_depth < 2:
+            start_index = len(data_list)
+            subset_items: List[Dict[str, str]] = items[start_index:]
             if subset_items:
                 subset_map, subset_usage = translate_batch(
                     client,
@@ -326,14 +319,24 @@ def translate_batch(
                     _retry_depth=_retry_depth + 1,
                 )
                 usage.add(subset_usage)
-                data.update(subset_map)
-                inter = expected_key_set.intersection(data.keys())
-                missing = [k for k in unique_keys if not data.get(k)]
-        if len(inter) < len(expected_key_set):
-            missing = [k for k in unique_keys if not data.get(k)]
-            snippet = (last_raw or "").strip().replace("\r", " ").replace("\n", " ")[:400]
-            raise RuntimeError(f"LLM output missing {len(missing)} keys (expected {len(unique_keys)}). Raw snippet: {snippet}")
-    ordered = {str(k): str(data.get(k, "")) for k in expected_keys}
+                for idx in range(start_index, expected_len):
+                    key = expected_keys[idx]
+                    val = subset_map.get(key, "")
+                    if idx < len(data_list):
+                        data_list[idx] = val
+                    else:
+                        data_list.append(val)
+    if len(data_list) < expected_len:
+        snippet = (last_raw or "").strip().replace("\r", " ").replace("\n", " ")[:400]
+        raise RuntimeError(
+            f"LLM output returned {len(data_list)}/{expected_len} translations. Raw snippet: {snippet}"
+        )
+    if len(data_list) > expected_len:
+        data_list = data_list[:expected_len]
+    ordered: Dict[str, str] = {}
+    for idx, key in enumerate(expected_keys):
+        value = data_list[idx] if idx < len(data_list) else ""
+        ordered[str(key)] = str(value)
     return ordered, usage
 
 
