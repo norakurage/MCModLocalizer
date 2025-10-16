@@ -159,6 +159,7 @@ def translate_batch(
     items: List[Dict[str, str]],
     model: str,
     system_instructions: str,
+    _retry_depth: int = 0,
 ) -> Tuple[Dict[str, str], UsageStats]:
     payload = json.dumps(items, ensure_ascii=False, indent=2)
     user_text = USER_TEMPLATE.replace("<<PAYLOAD>>", payload)
@@ -280,8 +281,31 @@ def translate_batch(
         inter = expected_key_set.intersection(data.keys())
     if len(inter) < len(expected_key_set):
         missing = [k for k in unique_keys if not data.get(k)]
-        snippet = (last_raw or "").strip().replace("\r", " ").replace("\n", " ")[:400]
-        raise RuntimeError(f"LLM output missing {len(missing)} keys (expected {len(unique_keys)}). Raw snippet: {snippet}")
+        if missing and _retry_depth < 2:
+            seen: set[str] = set()
+            subset_items: List[Dict[str, str]] = []
+            for it in items:
+                raw_key = it.get("key")
+                key = str(raw_key)
+                if key in missing and key not in seen:
+                    subset_items.append(it)
+                    seen.add(key)
+            if subset_items:
+                subset_map, subset_usage = translate_batch(
+                    client,
+                    subset_items,
+                    model,
+                    system_instructions,
+                    _retry_depth=_retry_depth + 1,
+                )
+                usage.add(subset_usage)
+                data.update(subset_map)
+                inter = expected_key_set.intersection(data.keys())
+                missing = [k for k in unique_keys if not data.get(k)]
+        if len(inter) < len(expected_key_set):
+            missing = [k for k in unique_keys if not data.get(k)]
+            snippet = (last_raw or "").strip().replace("\r", " ").replace("\n", " ")[:400]
+            raise RuntimeError(f"LLM output missing {len(missing)} keys (expected {len(unique_keys)}). Raw snippet: {snippet}")
     ordered = {str(k): str(data.get(k, "")) for k in expected_keys}
     return ordered, usage
 
