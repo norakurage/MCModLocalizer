@@ -389,6 +389,46 @@ def write_json(path: Path, data: Dict[str, str]):
     tmp.replace(path)
 
 
+def _progress_state_path(out_path: Path) -> Path:
+    return out_path.with_suffix(".progress.json")
+
+
+def _load_progress_state(path: Path) -> List[str]:
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    keys: List[str] = []
+    if isinstance(data, dict):
+        pending = data.get("pending_keys")
+        if isinstance(pending, list):
+            keys = [str(k) for k in pending if isinstance(k, (str, int, float, bool))]
+    elif isinstance(data, list):
+        keys = [str(k) for k in data if isinstance(k, (str, int, float, bool))]
+    return [k for k in keys if k]
+
+
+def _save_progress_state(path: Path, pending_keys: List[str]) -> None:
+    if not pending_keys:
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
+        return
+    payload = {
+        "pending_keys": pending_keys,
+        "updated_at": time.time(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 @dataclass
 class ExtractionResult:
     primary_modid: Optional[str]
@@ -522,17 +562,37 @@ def translate_localizations(
         if base_map:
             base_token_maps[k] = base_map
         todo.append((k, pv))
+    progress_path = _progress_state_path(out_path)
+    resume_keys = _load_progress_state(progress_path)
+    if resume_keys:
+        ordered: List[Tuple[str, str]] = []
+        seen: set[str] = set()
+        todo_map: Dict[str, str] = {k: v for k, v in todo}
+        for key in resume_keys:
+            if key in todo_map and key not in seen:
+                ordered.append((key, todo_map[key]))
+                seen.add(key)
+        if ordered:
+            for k, v in todo:
+                if k not in seen:
+                    ordered.append((k, v))
+            todo = ordered
+            if log:
+                log(f"[INFO] 中断した翻訳を再開します（残り {len(todo)} 件）。")
     if existing_translations and log:
         log(
             f"[INFO] 既存訳 {len(existing_translations)} 件を検出。未訳 {len(todo)} 件を補完します。"
         )
     batches = list(chunk_pairs(todo))
     total = sum(len(batch) for batch in batches)
+    remaining_keys: List[str] = [k for k, _ in todo]
+    _save_progress_state(progress_path, remaining_keys)
     if total == 0:
         if log:
             log("[OK] すでに翻訳済みです（差分なし）。")
         if progress:
             progress(1.0, "完了")
+        _save_progress_state(progress_path, [])
         return TranslationResult(total=0, created=0, out_path=out_path, stopped=False)
     system_instructions = SYSTEM_INSTRUCTIONS_BASE
     client = OpenAI(api_key=api_key)
@@ -580,6 +640,11 @@ def translate_localizations(
                 ja = restore_tokens(ja, base_map)
             dst[k] = ja
             created += 1
+        processed_keys = [item["key"] for item in payload]
+        if processed_keys:
+            remaining_keys = remaining_keys[len(processed_keys):]
+        write_json(out_path, dst)
+        _save_progress_state(progress_path, remaining_keys)
         if progress:
             ratio = created / max(1, total)
             progress(ratio, f"{created}/{total}")
@@ -588,6 +653,7 @@ def translate_localizations(
         if sleep_interval > 0:
             time.sleep(sleep_interval)
     write_json(out_path, dst)
+    _save_progress_state(progress_path, remaining_keys)
     if log:
         log(f"[OK] 書き込み完了: {out_path}")
     if progress:
