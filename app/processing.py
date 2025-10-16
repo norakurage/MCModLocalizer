@@ -506,6 +506,27 @@ def translate_localizations(
         log(f"[RUN] 出力: {out_path}")
     src: Dict[str, str] = load_json(in_path)
     dst: Dict[str, str] = load_json(out_path)
+    resume_path = out_path.with_suffix(".resume.json")
+
+    def _load_resume_keys() -> List[str]:
+        if not resume_path.exists():
+            return []
+        try:
+            raw = resume_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                pending = data.get("pending_keys") or data.get("keys")
+                if isinstance(pending, list):
+                    return [str(k) for k in pending]
+            if isinstance(data, list):
+                return [str(k) for k in data]
+        except Exception:
+            if log:
+                log(f"[WARN] 再開ポイントファイルの読み込みに失敗しました: {resume_path}")
+        return []
+
+    resume_keys = {key for key in _load_resume_keys() if key in src}
+    resume_detected = bool(resume_keys)
     if not dst and existing_translations:
         dst = dict(existing_translations)
         if log:
@@ -516,16 +537,42 @@ def translate_localizations(
     base_token_maps: Dict[str, Dict[str, str]] = {}
     for k, v in src.items():
         sv = str(v)
+        if resume_keys and k not in resume_keys:
+            continue
         if k in dst and str(dst[k]).strip() != "":
+            resume_keys.discard(k)
             continue
         pv, base_map = protect_tokens(sv)
         if base_map:
             base_token_maps[k] = base_map
         todo.append((k, pv))
+    pending_keys = {k for k, _ in todo}
+
+    def _save_resume() -> None:
+        if pending_keys:
+            try:
+                resume_path.parent.mkdir(parents=True, exist_ok=True)
+                resume_path.write_text(
+                    json.dumps({"pending_keys": sorted(pending_keys)}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                if log:
+                    log(f"[WARN] 再開ポイントファイルの書き込みに失敗しました: {resume_path}")
+        else:
+            if resume_path.exists():
+                try:
+                    resume_path.unlink()
+                except Exception:
+                    if log:
+                        log(f"[WARN] 再開ポイントファイルの削除に失敗しました: {resume_path}")
+
     if existing_translations and log:
         log(
             f"[INFO] 既存訳 {len(existing_translations)} 件を検出。未訳 {len(todo)} 件を補完します。"
         )
+    elif resume_detected and log:
+        log(f"[INFO] 前回の中断を検出。未処理 {len(todo)} 件から再開します。")
     batches = list(chunk_pairs(todo))
     total = sum(len(batch) for batch in batches)
     if total == 0:
@@ -533,7 +580,9 @@ def translate_localizations(
             log("[OK] すでに翻訳済みです（差分なし）。")
         if progress:
             progress(1.0, "完了")
+        _save_resume()
         return TranslationResult(total=0, created=0, out_path=out_path, stopped=False)
+    _save_resume()
     system_instructions = SYSTEM_INSTRUCTIONS_BASE
     client = OpenAI(api_key=api_key)
     created = 0
@@ -580,14 +629,19 @@ def translate_localizations(
                 ja = restore_tokens(ja, base_map)
             dst[k] = ja
             created += 1
+            if k in pending_keys:
+                pending_keys.discard(k)
         if progress:
             ratio = created / max(1, total)
             progress(ratio, f"{created}/{total}")
         if log:
             log(f"[INFO] バッチ完了: {created}/{total}")
+        write_json(out_path, dst)
+        _save_resume()
         if sleep_interval > 0:
             time.sleep(sleep_interval)
     write_json(out_path, dst)
+    _save_resume()
     if log:
         log(f"[OK] 書き込み完了: {out_path}")
     if progress:
