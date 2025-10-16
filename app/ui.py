@@ -646,21 +646,94 @@ $notifier.Show($toast)
                 temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
                 temp_dir_path = Path(temp_dir_obj.name)
                 self._append_log(f"[INFO] 一時作業フォルダ: {temp_dir_path}")
-                self._append_log(f"[RUN] 抽出: {jar_path}")
-                result: ExtractionResult = extract_localizations(
-                    jar_path,
-                    temp_dir_path,
-                    log=self._append_log,
-                    progress=self._set_progress,
-                )
+
+                selected_path = jar_path
+                mods_dir = selected_path if selected_path.is_dir() else selected_path.parent
+                if selected_path.is_dir():
+                    self._append_log(f"[INFO] 指定フォルダ内の Mod を処理します: {mods_dir}")
+                else:
+                    self._append_log(f"[INFO] {mods_dir} 内の Mod を処理します。")
+                jar_candidates: list[Path] = []
+                if selected_path.is_dir():
+                    jar_candidates = sorted(
+                        [p for p in mods_dir.iterdir() if p.is_file() and p.suffix.lower() == ".jar"],
+                        key=lambda p: p.name.lower(),
+                    )
+                else:
+                    parent = mods_dir
+                    if parent and parent.exists():
+                        jar_candidates = sorted(
+                            [p for p in parent.iterdir() if p.is_file() and p.suffix.lower() == ".jar"],
+                            key=lambda p: p.name.lower(),
+                        )
+                        if selected_path not in jar_candidates and selected_path.exists() and selected_path.suffix.lower() == ".jar":
+                            jar_candidates.append(selected_path)
+                            jar_candidates.sort(key=lambda p: p.name.lower())
+
+                if not jar_candidates:
+                    self._append_log("[ERROR] mods フォルダ内に対象の Mod JAR が見つかりませんでした。")
+                    self._set_progress(0.0, "対象なし")
+                    toast_message = "対象となる Mod JAR が見つかりませんでした。"
+                    toast_is_error = True
+                    return
+
+                pack_base_name = (mods_dir.name if mods_dir and mods_dir.name else selected_path.stem) or "mods"
+                pack_base_name = pack_base_name.strip() or "mods"
+                pack_dir_name = f"{pack_base_name}_ja_resource"
+                existing_pack_dir = out_dir / pack_dir_name
+                reuse_existing_pack = existing_pack_dir.exists()
+                if reuse_existing_pack:
+                    self._append_log(f"[INFO] 既存のリソースパックを参照します: {existing_pack_dir}")
+
+                jar_list_text = ", ".join(p.name for p in jar_candidates)
+                self._append_log(f"[INFO] 一括翻訳対象 ({len(jar_candidates)} 件): {jar_list_text}")
+
                 targets: list[tuple[str, Path]] = []
-                for modid in result.mod_maps.keys():
-                    en_path = temp_dir_path / modid / "en_us.json"
-                    if en_path.exists():
-                        targets.append((modid, en_path))
+                for idx, jar_file in enumerate(jar_candidates, start=1):
+                    self._append_log(f"[RUN] 抽出 {idx}/{len(jar_candidates)}: {jar_file}")
+                    jar_temp_dir = temp_dir_path / jar_file.stem
+                    if jar_temp_dir.exists():
+                        shutil.rmtree(jar_temp_dir)
+                    jar_temp_dir.mkdir(parents=True, exist_ok=True)
+                    self._set_progress(0.0, f"抽出 {idx}/{len(jar_candidates)} ({jar_file.stem})")
+
+                    def _extract_progress(ratio: float, text: str, *, _stem: str = jar_file.stem):
+                        label = text.strip() or "抽出中"
+                        self._set_progress(ratio, f"{_stem}: {label}")
+
+                    try:
+                        result: ExtractionResult = extract_localizations(
+                            jar_file,
+                            jar_temp_dir,
+                            log=self._append_log,
+                            progress=_extract_progress,
+                        )
+                    except Exception as ex:
+                        self._append_log(f"[ERROR] 抽出に失敗しました ({jar_file}): {repr(ex)}")
+                        self._append_log(traceback.format_exc())
+                        continue
+
+                    for modid in result.mod_maps.keys():
+                        en_path = jar_temp_dir / modid / "en_us.json"
+                        if en_path.exists():
+                            if reuse_existing_pack:
+                                existing_ja = existing_pack_dir / "assets" / modid / "lang" / "ja_jp.json"
+                                if existing_ja.exists():
+                                    ja_target = jar_temp_dir / modid / "ja_jp.json"
+                                    try:
+                                        ja_target.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(existing_ja, ja_target)
+                                        self._append_log(f"[INFO] 既存訳を再利用: {existing_ja} -> {ja_target}")
+                                    except Exception as copy_ex:
+                                        self._append_log(f"[WARN] 既存訳のコピーに失敗しました ({existing_ja}): {repr(copy_ex)}")
+                            targets.append((modid, en_path))
+                        else:
+                            self._append_log(f"[WARN] en_us.json が見つかりませんでした: {en_path}")
+
                 if targets:
+                    self._append_log(f"[INFO] 翻訳対象 namespace 数: {len(targets)}")
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
-                    summary = self._translate_targets(targets, jar_path, temp_dir_path, out_dir)
+                    summary = self._translate_targets(targets, pack_base_name, temp_dir_path, out_dir)
                     self._update_token_usage_ui(summary)
                     if summary.aborted:
                         toast_message = "翻訳が停止されました。"
@@ -700,7 +773,7 @@ $notifier.Show($toast)
     def _translate_targets(
         self,
         targets: list[tuple[str, Path]],
-        jar_path: Path,
+        pack_base_name: str,
         temp_dir: Path,
         output_dir: Path,
     ) -> TranslationSummary:
@@ -729,6 +802,7 @@ $notifier.Show($toast)
         if model not in self.available_models:
             model = self.available_models[0]
         self._append_log(f"[INFO] リソースパック出力先: {output_dir}")
+        self._append_log(f"[INFO] リソースパック名ベース: {pack_base_name}")
         self.stop_event.clear()
         self.btn_stop.disabled = False
         self.btn_stop.update()
@@ -798,7 +872,7 @@ $notifier.Show($toast)
             self.btn_stop.update()
         if produced and not aborted:
             try:
-                pack_dir = self._generate_resource_pack(jar_path, temp_dir, output_dir, produced)
+                pack_dir = self._generate_resource_pack(pack_base_name, temp_dir, output_dir, produced)
                 if pack_dir:
                     pack_dir_path = pack_dir
                     self._append_log(f"[OK] リソースパックを更新しました: {pack_dir}")
@@ -834,7 +908,7 @@ $notifier.Show($toast)
 
     def _generate_resource_pack(
         self,
-        jar_path: Path,
+        pack_base_name: str,
         temp_dir: Path,
         output_dir: Path,
         produced: list[tuple[str, Path]],
@@ -842,8 +916,8 @@ $notifier.Show($toast)
         if not produced:
             return None
         self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
-        primary_modid = produced[0][0] if produced and produced[0][0] else jar_path.stem
-        base_name = primary_modid or (jar_path.stem or "ja_resource")
+        primary_modid = produced[0][0] if produced and produced[0][0] else ""
+        base_name = pack_base_name or primary_modid or "ja_resource"
         pack_name = f"{base_name}_ja_resource"
         pack_dir = output_dir / pack_name
         preserved_pack_png: bytes | None = None
