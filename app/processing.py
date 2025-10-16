@@ -59,6 +59,23 @@ ProgressFn = Callable[[float, str], None]
 StopFn = Callable[[], bool]
 
 
+def format_block_progress(current: int, total: int, *, width: int = 20) -> str:
+    total = max(total, 0)
+    if total == 0:
+        cells = max(1, width)
+        bar = "█" * cells
+        return f"[{bar}] 100%（0完了・残り0）"
+
+    current_clamped = max(0, min(current, total))
+    ratio = current_clamped / total
+    cells = max(1, width)
+    filled = min(cells, int(round(ratio * cells)))
+    bar = "█" * filled + "░" * (cells - filled)
+    percent = int(round(ratio * 100))
+    remaining = max(0, total - current_clamped)
+    return f"[{bar}] {percent:3d}%（{current_clamped}完了・残り{remaining}）"
+
+
 @dataclass
 class UsageStats:
     prompt_tokens: int = 0
@@ -410,7 +427,7 @@ def extract_localizations(
         mod_maps = read_en_us_from_jar(jar)
         if not mod_maps:
             if log:
-                log(f"[WARN] en_us.json が見つからないためスキップしました: {jar}")
+                log(f"[WARN] en_us.json が見つからないためスキップしました: {jar.name}")
             continue
         per_jar_maps.append((jar, mod_maps))
         total_mods += len(mod_maps)
@@ -421,8 +438,14 @@ def extract_localizations(
     done = 0
     for jar, mod_maps in per_jar_maps:
         if len(mod_maps) > 1 and log:
-            mods = ", ".join(f"{m}({len(d)} keys)" for m, d in mod_maps.items())
-            log(f"[WARN] 複数 namespace を含む Mod を検出しました ({jar}): {mods}。全て処理します。")
+            items = "\n".join(
+                f"- {m}（キー数: {len(d)}）" for m, d in mod_maps.items()
+            )
+            log(
+                "[WARN] 複数 namespace を含む Mod を検出しました。全て処理します。\n"
+                f"- 対象 JAR: {jar.name}\n"
+                f"{items}"
+            )
         ja_maps = read_lang_from_jar(jar, "ja_jp")
         for modid, en_map in mod_maps.items():
             mod_dir = out_dir / modid
@@ -435,20 +458,23 @@ def extract_localizations(
             aggregated_maps[modid] = en_map
             mod_sources[modid] = jar
             if log:
-                note = " (既存の ja_jp を読み込み)" if existing_ja else ""
-                log(f"[OK] 抽出: {modid} -> {en_path}{note}")
+                note = "（既存の ja_jp を読み込み）" if existing_ja else ""
+                log(f"[OK] 抽出: {modid}{note}")
             if primary_modid is None or (len(en_map) > len(primary_map or {})):
                 primary_modid = modid
                 primary_map = en_map
                 primary_en_path = en_path
             done += 1
             if progress and total_mods:
-                progress(done / total_mods, f"{done}/{total_mods}")
+                progress(
+                    done / total_mods,
+                    format_block_progress(done, total_mods, width=12),
+                )
 
     if log and primary_modid and primary_map is not None:
         log(f"[INFO] 最大キー数の Mod: {primary_modid}（キー数: {len(primary_map)}）")
     if progress and total_mods:
-        progress(1.0, f"{total_mods}/{total_mods}")
+        progress(1.0, format_block_progress(total_mods, total_mods, width=12))
 
     return ExtractionResult(
         primary_modid=primary_modid,
@@ -475,8 +501,8 @@ def translate_localizations(
     if should_stop is None:
         should_stop = lambda: False
     if log:
-        log(f"[RUN] 入力: {in_path}")
-        log(f"[RUN] 出力: {out_path}")
+        log("[RUN] 入力ファイルを読み込みます。")
+        log("[RUN] 出力ファイルを準備します。")
     src: Dict[str, str] = load_json(in_path)
     dst: Dict[str, str] = load_json(out_path)
     resume_data: Dict[str, str] = {}
@@ -506,7 +532,7 @@ def translate_localizations(
     if resume_path and resume_path.exists():
         resume_data = load_json(resume_path)
         if log and resume_data:
-            log(f"[INFO] 中断された翻訳データを読み込みます: {resume_path}")
+            log("[INFO] 中断された翻訳データを読み込みます。")
         if _merge_missing(resume_data) and log:
             log("[INFO] 中断データから未訳を引き継ぎます。")
     todo: List[Tuple[str, str]] = []
@@ -529,7 +555,7 @@ def translate_localizations(
         if log:
             log("[OK] すでに翻訳済みです（差分なし）。")
         if progress:
-            progress(1.0, "完了")
+            progress(1.0, format_block_progress(total, total, width=12))
         if resume_path and resume_path.exists():
             try:
                 resume_path.unlink()
@@ -546,7 +572,7 @@ def translate_localizations(
     usage_total = UsageStats()
     usage_batches: List[UsageStats] = []
     if progress and total:
-        progress(0.0, f"0/{total}")
+        progress(0.0, format_block_progress(0, total, width=12))
     total_batches = len(batches)
     for batch_index, batch in enumerate(batches, start=1):
         if should_stop():
@@ -577,23 +603,28 @@ def translate_localizations(
             created += 1
         if progress:
             ratio = created / max(1, total)
-            progress(ratio, f"{created}/{total}")
+            progress(ratio, format_block_progress(created, total, width=12))
         if log:
-            log(f"[INFO] バッチ完了: {created}/{total}")
+            log(
+                f"[INFO] バッチ完了: {format_block_progress(created, total, width=12)}"
+            )
         if sleep_interval > 0:
             time.sleep(sleep_interval)
     write_json(out_path, dst)
     if log:
-        log(f"[OK] 書き込み完了: {out_path}")
+        log("[OK] ja_jp.json の書き込みが完了しました。")
     if progress:
         final_ratio = created / max(1, total)
-        progress(1.0 if not stopped else final_ratio, f"{created}/{total}")
+        progress(
+            1.0 if not stopped else final_ratio,
+            format_block_progress(created, total, width=12),
+        )
     remaining = sum(1 for k in src if str(dst.get(k, "")).strip() == "")
     if resume_path:
         if remaining > 0 or stopped:
             write_json(resume_path, dst)
             if log:
-                log(f"[INFO] 翻訳の進捗を保存しました: {resume_path}")
+                log("[INFO] 翻訳の進捗を保存しました。")
         else:
             try:
                 if resume_path.exists():
