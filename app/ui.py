@@ -271,6 +271,7 @@ class LocalizeApp:
             self.mod_jar_path.update()
             self._save_value(self.K_LAST_JAR_PATH, str(selected))
             self._remember_dir(self.K_DIR_JAR, selected)
+            self._auto_set_output_dir(selected)
 
     def _on_pick_dir(self, e: ft.FilePickerResultEvent):
         if e.path:
@@ -300,6 +301,37 @@ class LocalizeApp:
         except Exception:
             dir_path = dir_path.absolute()
         self._save_value(key, str(dir_path))
+
+    def _auto_set_output_dir(self, jar_path: Path):
+        try:
+            jar_path = jar_path.resolve()
+        except Exception:
+            jar_path = jar_path.absolute()
+        target_root: Path | None = None
+        for parent in jar_path.parents:
+            if parent.name.lower() == "mods":
+                target_root = parent.parent
+                break
+        if not target_root:
+            return
+        candidate_dir: Path | None = None
+        candidate_names = [
+            "resourcepacks",
+            "resource_packs",
+            "resourcepack",
+            "resource",
+        ]
+        for name in candidate_names:
+            candidate = target_root / name
+            if candidate.exists() and candidate.is_dir():
+                candidate_dir = candidate
+                break
+        if candidate_dir is None:
+            candidate_dir = target_root / "resourcepacks"
+        self.output_dir.value = str(candidate_dir)
+        self.output_dir.update()
+        self._save_value(self.K_LAST_OUTPUT_PATH, str(candidate_dir))
+        self._remember_dir(self.K_DIR_OUTPUT, candidate_dir)
 
     def _get_initial_directory(self, key: str) -> str | None:
         stored = self._load_value(key)
