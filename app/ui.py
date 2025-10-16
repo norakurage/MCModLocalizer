@@ -768,10 +768,19 @@ $notifier.Show($toast)
         total_entries = 0
         translated_entries = 0
         pack_dir_path: Path | None = None
+        pack_generated_once = False
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_token_count = 0
         usage_records: list[tuple[int, int, int]] = []
+        existing_pack_translations = self._collect_pack_translations(output_dir)
+
+        def _register_pack_contents(pack_root: Path | None):
+            if not pack_root:
+                return
+            for mod_name, lang_path in self._collect_pack_translations(pack_root).items():
+                existing_pack_translations[mod_name] = lang_path
+
         try:
             for idx, (modid, in_path, existing_ja) in enumerate(targets, start=1):
                 if self.stop_event.is_set():
@@ -803,6 +812,31 @@ $notifier.Show($toast)
                     elif event == "end":
                         self._stream_end()
 
+                pack_lang_path = existing_pack_translations.get(modid)
+                if pack_lang_path and pack_lang_path.exists():
+                    try:
+                        shutil.copy2(pack_lang_path, out_path)
+                        produced.append((modid, out_path))
+                        self._append_log(
+                            f"[INFO] 既存のリソースパックから ja_jp.json を再利用します: {pack_lang_path}"
+                        )
+                        self._set_progress(1.0, f"{modid}: 既存訳を利用")
+                        pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
+                        if pack_dir:
+                            pack_dir_path = pack_dir
+                            pack_generated_once = True
+                            self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
+                            _register_pack_contents(pack_dir)
+                        continue
+                    except Exception as reuse_error:
+                        try:
+                            out_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        self._append_log(
+                            f"[WARN] 既存訳の再利用に失敗したため翻訳を実行します ({modid}): {repr(reuse_error)}"
+                        )
+
                 try:
                     result = translate_localizations(
                         api_key=api_key,
@@ -832,6 +866,12 @@ $notifier.Show($toast)
                     if out_path.exists():
                         produced.append((modid, out_path))
                     self._append_log(f"[OK] ja_jp.json を作成しました: {out_path}")
+                    pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
+                    if pack_dir:
+                        pack_dir_path = pack_dir
+                        pack_generated_once = True
+                        self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
+                        _register_pack_contents(pack_dir)
                 except Exception as ex:
                     had_error = True
                     self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
@@ -842,7 +882,7 @@ $notifier.Show($toast)
             self.stop_event.clear()
             self.btn_stop.disabled = True
             self.btn_stop.update()
-        if produced and not aborted:
+        if produced and not aborted and not pack_generated_once:
             try:
                 pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
                 if pack_dir:
@@ -851,6 +891,7 @@ $notifier.Show($toast)
                     pack_png = pack_dir / "pack.png"
                     if not pack_png.exists():
                         self._append_log(f"[INFO] pack.png は手動で配置してください: {pack_png}")
+                    _register_pack_contents(pack_dir)
             except Exception as ex:
                 had_error = True
                 self._append_log(f"[ERROR] リソースパックの生成に失敗しました: {repr(ex)}")
@@ -888,13 +929,10 @@ $notifier.Show($toast)
         if not produced:
             return None
         self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
-        primary_modid = produced[0][0] if produced and produced[0][0] else ""
-        if not primary_modid:
-            if source_path.is_dir():
-                primary_modid = source_path.name
-            else:
-                primary_modid = source_path.stem
-        base_name = primary_modid or "ja_resource"
+        base_name = self._determine_pack_base_name(source_path)
+        if not base_name and produced and produced[0][0]:
+            base_name = produced[0][0]
+        base_name = base_name or "ja_resource"
         pack_name = f"{base_name}_ja_resource"
         pack_dir = output_dir / pack_name
         preserved_pack_png: bytes | None = None
@@ -920,6 +958,17 @@ $notifier.Show($toast)
         if preserved_pack_png is not None:
             (pack_dir / "pack.png").write_bytes(preserved_pack_png)
         return pack_dir
+
+    def _determine_pack_base_name(self, source_path: Path) -> str:
+        candidate = ""
+        try:
+            if source_path.is_dir():
+                candidate = source_path.name
+            else:
+                candidate = source_path.stem
+        except Exception:
+            candidate = ""
+        return candidate.strip()
 
     def _write_pack_mcmeta(self, pack_dir: Path, mod_name: str):
         latest_pack_format = 34
@@ -951,6 +1000,25 @@ $notifier.Show($toast)
             elif item.is_file():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, target)
+
+    def _collect_pack_translations(self, base_dir: Path) -> dict[str, Path]:
+        translations: dict[str, Path] = {}
+        if not base_dir.exists() or not base_dir.is_dir():
+            return translations
+
+        try:
+            for candidate in base_dir.rglob("ja_jp.json"):
+                if not candidate.is_file():
+                    continue
+                parent = candidate.parent
+                if parent.name == "lang" and parent.parent != parent:
+                    translations[parent.parent.name] = candidate
+                else:
+                    translations[parent.name] = candidate
+        except Exception:
+            return translations
+
+        return translations
 
 
 def main(page: ft.Page):
