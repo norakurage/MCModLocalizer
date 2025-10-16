@@ -682,11 +682,12 @@ $notifier.Show($toast)
                     log=self._append_log,
                     progress=self._set_progress,
                 )
-                targets: list[tuple[str, Path]] = []
+                targets: list[tuple[str, Path, dict[str, str]]] = []
                 for modid in result.mod_maps.keys():
                     en_path = temp_dir_path / modid / "en_us.json"
                     if en_path.exists():
-                        targets.append((modid, en_path))
+                        existing_ja = result.existing_ja_maps.get(modid, {})
+                        targets.append((modid, en_path, existing_ja))
                 if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
                     summary = self._translate_targets(targets, mods_dir, temp_dir_path, out_dir)
@@ -728,7 +729,7 @@ $notifier.Show($toast)
 
     def _translate_targets(
         self,
-        targets: list[tuple[str, Path]],
+        targets: list[tuple[str, Path, dict[str, str]]],
         source_path: Path,
         temp_dir: Path,
         output_dir: Path,
@@ -772,7 +773,7 @@ $notifier.Show($toast)
         total_token_count = 0
         usage_records: list[tuple[int, int, int]] = []
         try:
-            for idx, (modid, in_path) in enumerate(targets, start=1):
+            for idx, (modid, in_path, existing_ja) in enumerate(targets, start=1):
                 if self.stop_event.is_set():
                     aborted = True
                     break
@@ -808,6 +809,7 @@ $notifier.Show($toast)
                         model=model,
                         in_path=in_path,
                         out_path=out_path,
+                        existing_translations=existing_ja,
                         log=self._append_log,
                         progress=_progress_wrapper,
                         should_stop=self.stop_event.is_set,
