@@ -48,6 +48,7 @@ class LocalizeApp:
     def __init__(self, page: ft.Page):
         self.page = page
         self.stop_event = threading.Event()
+        self._streaming_active = False
         # 保存キー
         self.K_API = "openai_api_key"
         self.K_MODEL = "openai_model"
@@ -494,6 +495,31 @@ class LocalizeApp:
         self.log.value = (self.log.value + ("\n" if self.log.value else "")) + msg
         self.log.update()
 
+    def _stream_start(self, label: str):
+        if self._streaming_active:
+            self._stream_end()
+        if label:
+            self._append_log(f"[LLM] {label}")
+        else:
+            self._append_log("[LLM] 応答を受信中...")
+        self.log.value += " "
+        self.log.update()
+        self._streaming_active = True
+
+    def _stream_chunk(self, chunk: str):
+        if not chunk:
+            return
+        self.log.value += chunk
+        self.log.update()
+
+    def _stream_end(self):
+        if not self._streaming_active:
+            return
+        if not self.log.value.endswith("\n"):
+            self.log.value += "\n"
+            self.log.update()
+        self._streaming_active = False
+
     def _set_progress(self, ratio: float, text: str = ""):
         self.progress.value = max(0.0, min(1.0, ratio))
         self.progress.update()
@@ -762,6 +788,20 @@ $notifier.Show($toast)
                     label = f"{_modid}: {label}" if label else _modid
                     self._set_progress(ratio, label)
 
+                def _stream_event(event: str, payload: str | None, *, _modid: str = modid):
+                    if event == "start":
+                        label = payload or "応答を受信中..."
+                        self._stream_start(f"{_modid} {label}")
+                    elif event == "delta":
+                        if payload:
+                            self._stream_chunk(payload)
+                    elif event == "error":
+                        if payload:
+                            self._stream_chunk(f"(エラー: {payload})")
+                        self._stream_end()
+                    elif event == "end":
+                        self._stream_end()
+
                 try:
                     result = translate_localizations(
                         api_key=api_key,
@@ -771,6 +811,7 @@ $notifier.Show($toast)
                         log=self._append_log,
                         progress=_progress_wrapper,
                         should_stop=self.stop_event.is_set,
+                        stream_events=_stream_event,
                     )
                     total_entries += result.total
                     translated_entries += result.created

@@ -160,6 +160,7 @@ def translate_batch(
     model: str,
     system_instructions: str,
     _retry_depth: int = 0,
+    stream_handler: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> Tuple[Dict[str, str], UsageStats]:
     payload = json.dumps(items, ensure_ascii=False, indent=2)
     user_text = USER_TEMPLATE.replace("<<PAYLOAD>>", payload)
@@ -239,7 +240,32 @@ def translate_batch(
         if with_response_format:
             args["response_format"] = response_format_schema
         try:
-            resp = client.responses.create(**args)  # type: ignore[arg-type]
+            if stream_handler:
+                chunks: List[str] = []
+                stream_error: Optional[str] = None
+                with client.responses.stream(**args) as stream:  # type: ignore[arg-type]
+                    for event in stream:
+                        etype = getattr(event, "type", "")
+                        if etype == "response.output_text.delta":
+                            delta = getattr(event, "delta", "") or ""
+                            if delta:
+                                chunks.append(delta)
+                                stream_handler("delta", delta)
+                        elif etype == "response.error":
+                            err = getattr(event, "error", None)
+                            message = ""
+                            if err is not None:
+                                message = getattr(err, "message", "") or str(err)
+                            stream_error = message or "OpenAI streaming error"
+                            if message:
+                                stream_handler("error", message)
+                    resp = stream.get_final_response()
+                if stream_error:
+                    raise RuntimeError(stream_error)
+                out = "".join(chunks)
+            else:
+                resp = client.responses.create(**args)  # type: ignore[arg-type]
+                out = ""
         except TypeError:
             if with_response_format:
                 return _call_responses(
@@ -248,7 +274,8 @@ def translate_batch(
                 )
             raise
         usage = _usage_from_response(resp)
-        out = _extract_text(resp)
+        if not out:
+            out = _extract_text(resp)
         last_raw = out or ""
         return _parse_any(out), usage
 
@@ -462,6 +489,7 @@ def translate_localizations(
     progress: Optional[ProgressFn] = None,
     should_stop: Optional[StopFn] = None,
     sleep_interval: float = 0.4,
+    stream_events: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> TranslationResult:
     if should_stop is None:
         should_stop = lambda: False
@@ -496,7 +524,8 @@ def translate_localizations(
     usage_batches: List[UsageStats] = []
     if progress and total:
         progress(0.0, f"0/{total}")
-    for batch in batches:
+    total_batches = len(batches)
+    for batch_index, batch in enumerate(batches, start=1):
         if should_stop():
             stopped = True
             if log:
@@ -507,7 +536,22 @@ def translate_localizations(
         for k, protected in batch:
             kv[k] = (protected, {})
             payload.append({"key": k, "value": protected})
-        out_map, batch_usage = translate_batch(client, payload, model=model, system_instructions=system_instructions)
+        if stream_events:
+            stream_events("start", f"バッチ {batch_index}/{total_batches}")
+        def _handle_stream(event: str, payload_text: Optional[str]) -> None:
+            if stream_events:
+                stream_events(event, payload_text)
+        try:
+            out_map, batch_usage = translate_batch(
+                client,
+                payload,
+                model=model,
+                system_instructions=system_instructions,
+                stream_handler=_handle_stream if stream_events else None,
+            )
+        finally:
+            if stream_events:
+                stream_events("end", None)
         usage_total.add(batch_usage)
         usage_batches.append(batch_usage)
         for k, (protected2, m) in kv.items():
