@@ -773,6 +773,14 @@ $notifier.Show($toast)
         total_completion_tokens = 0
         total_token_count = 0
         usage_records: list[tuple[int, int, int]] = []
+        existing_pack_translations = self._collect_pack_translations(output_dir)
+
+        def _register_pack_contents(pack_root: Path | None):
+            if not pack_root:
+                return
+            for mod_name, lang_path in self._collect_pack_translations(pack_root).items():
+                existing_pack_translations[mod_name] = lang_path
+
         try:
             for idx, (modid, in_path, existing_ja) in enumerate(targets, start=1):
                 if self.stop_event.is_set():
@@ -804,7 +812,7 @@ $notifier.Show($toast)
                     elif event == "end":
                         self._stream_end()
 
-                pack_lang_path = self._find_existing_pack_translation(output_dir, modid)
+                pack_lang_path = existing_pack_translations.get(modid)
                 if pack_lang_path and pack_lang_path.exists():
                     try:
                         shutil.copy2(pack_lang_path, out_path)
@@ -818,6 +826,7 @@ $notifier.Show($toast)
                             pack_dir_path = pack_dir
                             pack_generated_once = True
                             self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
+                            _register_pack_contents(pack_dir)
                         continue
                     except Exception as reuse_error:
                         try:
@@ -862,6 +871,7 @@ $notifier.Show($toast)
                         pack_dir_path = pack_dir
                         pack_generated_once = True
                         self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
+                        _register_pack_contents(pack_dir)
                 except Exception as ex:
                     had_error = True
                     self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
@@ -881,6 +891,7 @@ $notifier.Show($toast)
                     pack_png = pack_dir / "pack.png"
                     if not pack_png.exists():
                         self._append_log(f"[INFO] pack.png は手動で配置してください: {pack_png}")
+                    _register_pack_contents(pack_dir)
             except Exception as ex:
                 had_error = True
                 self._append_log(f"[ERROR] リソースパックの生成に失敗しました: {repr(ex)}")
@@ -908,32 +919,6 @@ $notifier.Show($toast)
         self.stop_event.set()
         self._append_log("[INFO] 停止要求を送信しました。現在のバッチ終了後に停止します。")
 
-    def _find_existing_pack_translation(self, output_dir: Path, modid: str) -> Path | None:
-        def _check_pack_dir(base: Path) -> Path | None:
-            candidate = base / "assets" / modid / "lang" / "ja_jp.json"
-            if candidate.exists():
-                return candidate
-            return None
-
-        if not output_dir.exists():
-            return None
-
-        direct = _check_pack_dir(output_dir)
-        if direct:
-            return direct
-
-        try:
-            for child in output_dir.iterdir():
-                if not child.is_dir():
-                    continue
-                found = _check_pack_dir(child)
-                if found:
-                    return found
-        except Exception:
-            return None
-
-        return None
-
     def _generate_resource_pack(
         self,
         source_path: Path,
@@ -944,13 +929,10 @@ $notifier.Show($toast)
         if not produced:
             return None
         self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
-        primary_modid = produced[0][0] if produced and produced[0][0] else ""
-        if not primary_modid:
-            if source_path.is_dir():
-                primary_modid = source_path.name
-            else:
-                primary_modid = source_path.stem
-        base_name = primary_modid or "ja_resource"
+        base_name = self._determine_pack_base_name(source_path)
+        if not base_name and produced and produced[0][0]:
+            base_name = produced[0][0]
+        base_name = base_name or "ja_resource"
         pack_name = f"{base_name}_ja_resource"
         pack_dir = output_dir / pack_name
         preserved_pack_png: bytes | None = None
@@ -976,6 +958,17 @@ $notifier.Show($toast)
         if preserved_pack_png is not None:
             (pack_dir / "pack.png").write_bytes(preserved_pack_png)
         return pack_dir
+
+    def _determine_pack_base_name(self, source_path: Path) -> str:
+        candidate = ""
+        try:
+            if source_path.is_dir():
+                candidate = source_path.name
+            else:
+                candidate = source_path.stem
+        except Exception:
+            candidate = ""
+        return candidate.strip()
 
     def _write_pack_mcmeta(self, pack_dir: Path, mod_name: str):
         latest_pack_format = 34
@@ -1007,6 +1000,25 @@ $notifier.Show($toast)
             elif item.is_file():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, target)
+
+    def _collect_pack_translations(self, base_dir: Path) -> dict[str, Path]:
+        translations: dict[str, Path] = {}
+        if not base_dir.exists() or not base_dir.is_dir():
+            return translations
+
+        try:
+            for candidate in base_dir.rglob("ja_jp.json"):
+                if not candidate.is_file():
+                    continue
+                parent = candidate.parent
+                if parent.name == "lang" and parent.parent != parent:
+                    translations[parent.parent.name] = candidate
+                else:
+                    translations[parent.name] = candidate
+        except Exception:
+            return translations
+
+        return translations
 
 
 def main(page: ft.Page):
