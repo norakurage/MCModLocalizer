@@ -498,6 +498,7 @@ def translate_localizations(
     should_stop: Optional[StopFn] = None,
     sleep_interval: float = 0.4,
     stream_events: Optional[Callable[[str, Optional[str]], None]] = None,
+    resume_path: Optional[Path] = None,
 ) -> TranslationResult:
     if should_stop is None:
         should_stop = lambda: False
@@ -506,12 +507,36 @@ def translate_localizations(
         log(f"[RUN] 出力: {out_path}")
     src: Dict[str, str] = load_json(in_path)
     dst: Dict[str, str] = load_json(out_path)
-    if not dst and existing_translations:
-        dst = dict(existing_translations)
-        if log:
-            log("[INFO] 既存の ja_jp.json が見つかったため差分のみを補完します。")
-    elif existing_translations and log:
-        log("[INFO] 既存の ja_jp.json を差分チェックに利用します。")
+    resume_data: Dict[str, str] = {}
+
+    def _merge_missing(source: Dict[str, str]) -> bool:
+        if not source:
+            return False
+        nonlocal dst
+        if not isinstance(dst, dict):
+            dst = {}
+        merged = False
+        for key, value in source.items():
+            if str(dst.get(key, "")).strip() == "" and str(value).strip() != "":
+                dst[key] = str(value)
+                merged = True
+        return merged
+
+    if existing_translations:
+        if not dst:
+            dst = dict(existing_translations)
+            if log:
+                log("[INFO] 既存の ja_jp.json が見つかったため差分のみを補完します。")
+        else:
+            if log:
+                log("[INFO] 既存の ja_jp.json を差分チェックに利用します。")
+            _merge_missing(existing_translations)
+    if resume_path and resume_path.exists():
+        resume_data = load_json(resume_path)
+        if log and resume_data:
+            log(f"[INFO] 中断された翻訳データを読み込みます: {resume_path}")
+        if _merge_missing(resume_data) and log:
+            log("[INFO] 中断データから未訳を引き継ぎます。")
     todo: List[Tuple[str, str]] = []
     base_token_maps: Dict[str, Dict[str, str]] = {}
     for k, v in src.items():
@@ -533,6 +558,14 @@ def translate_localizations(
             log("[OK] すでに翻訳済みです（差分なし）。")
         if progress:
             progress(1.0, "完了")
+        if resume_path and resume_path.exists():
+            try:
+                resume_path.unlink()
+                parent = resume_path.parent
+                if parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except Exception:
+                pass
         return TranslationResult(total=0, created=0, out_path=out_path, stopped=False)
     system_instructions = SYSTEM_INSTRUCTIONS_BASE
     client = OpenAI(api_key=api_key)
@@ -593,6 +626,21 @@ def translate_localizations(
     if progress:
         final_ratio = created / max(1, total)
         progress(1.0 if not stopped else final_ratio, f"{created}/{total}")
+    remaining = sum(1 for k in src if str(dst.get(k, "")).strip() == "")
+    if resume_path:
+        if remaining > 0 or stopped:
+            write_json(resume_path, dst)
+            if log:
+                log(f"[INFO] 翻訳の進捗を保存しました: {resume_path}")
+        else:
+            try:
+                if resume_path.exists():
+                    resume_path.unlink()
+                parent = resume_path.parent
+                if parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except Exception:
+                pass
     return TranslationResult(
         total=total,
         created=created,

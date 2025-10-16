@@ -774,6 +774,7 @@ $notifier.Show($toast)
         total_token_count = 0
         usage_records: list[tuple[int, int, int]] = []
         existing_pack_translations = self._collect_pack_translations(output_dir)
+        resume_root = output_dir / ".resume"
         skipped_existing = 0
 
         def _register_pack_contents(pack_root: Path | None):
@@ -814,7 +815,17 @@ $notifier.Show($toast)
                         self._stream_end()
 
                 pack_lang_path = existing_pack_translations.get(modid)
-                if pack_lang_path and pack_lang_path.exists():
+                resume_path = resume_root / modid / "ja_jp.json"
+                resume_exists = resume_path.exists()
+                if resume_exists:
+                    self._append_log(
+                        f"[INFO] 中断済みの翻訳ファイルを検出しました。未訳を引き継ぎます: {resume_path}"
+                    )
+                if (
+                    pack_lang_path
+                    and pack_lang_path.exists()
+                    and resume_root not in pack_lang_path.parents
+                ):
                     skipped_existing += 1
                     self._append_log(
                         f"[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします: {pack_lang_path}"
@@ -833,6 +844,7 @@ $notifier.Show($toast)
                         progress=_progress_wrapper,
                         should_stop=self.stop_event.is_set,
                         stream_events=_stream_event,
+                        resume_path=resume_path,
                     )
                     total_entries += result.total
                     translated_entries += result.created
@@ -844,7 +856,16 @@ $notifier.Show($toast)
                         completion = usage.completion_tokens
                         total_tok = usage.total_tokens or (prompt + completion)
                         usage_records.append((prompt, completion, total_tok))
+                    remaining = max(0, result.total - result.created)
                     if result.stopped:
+                        if remaining:
+                            self._append_log(
+                                f"[INFO] 未翻訳 {remaining} 件の進捗を保存しました。再開時は自動的に続きから処理します。"
+                            )
+                        elif resume_exists:
+                            self._append_log(
+                                "[INFO] 停止時点の翻訳は保存済みです。再開時に利用されます。"
+                            )
                         self._append_log("[INFO] ユーザーによって翻訳が停止されました。")
                         aborted = True
                         break
