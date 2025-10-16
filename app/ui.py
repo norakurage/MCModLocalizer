@@ -774,6 +774,7 @@ $notifier.Show($toast)
         total_token_count = 0
         usage_records: list[tuple[int, int, int]] = []
         existing_pack_translations = self._collect_pack_translations(output_dir)
+        skipped_existing = 0
 
         def _register_pack_contents(pack_root: Path | None):
             if not pack_root:
@@ -814,28 +815,12 @@ $notifier.Show($toast)
 
                 pack_lang_path = existing_pack_translations.get(modid)
                 if pack_lang_path and pack_lang_path.exists():
-                    try:
-                        shutil.copy2(pack_lang_path, out_path)
-                        produced.append((modid, out_path))
-                        self._append_log(
-                            f"[INFO] 既存のリソースパックから ja_jp.json を再利用します: {pack_lang_path}"
-                        )
-                        self._set_progress(1.0, f"{modid}: 既存訳を利用")
-                        pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
-                        if pack_dir:
-                            pack_dir_path = pack_dir
-                            pack_generated_once = True
-                            self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
-                            _register_pack_contents(pack_dir)
-                        continue
-                    except Exception as reuse_error:
-                        try:
-                            out_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        self._append_log(
-                            f"[WARN] 既存訳の再利用に失敗したため翻訳を実行します ({modid}): {repr(reuse_error)}"
-                        )
+                    skipped_existing += 1
+                    self._append_log(
+                        f"[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします: {pack_lang_path}"
+                    )
+                    self._set_progress(1.0, f"{modid}: 既存訳をスキップ")
+                    continue
 
                 try:
                     result = translate_localizations(
@@ -898,6 +883,10 @@ $notifier.Show($toast)
                 self._append_log(traceback.format_exc())
         elif aborted:
             self._append_log("[WARN] 翻訳が完了しなかったため、リソースパックの作成をスキップしました。")
+        elif skipped_existing:
+            self._append_log(
+                f"[INFO] {skipped_existing} 件の Mod は mods_ja_resource に既存の翻訳があったため処理をスキップしました。"
+            )
         else:
             self._append_log("[WARN] ja_jp.json が生成されなかったため、リソースパックの作成をスキップしました。")
         return TranslationSummary(
@@ -935,17 +924,6 @@ $notifier.Show($toast)
         base_name = base_name or "ja_resource"
         pack_name = f"{base_name}_ja_resource"
         pack_dir = output_dir / pack_name
-        preserved_pack_png: bytes | None = None
-        if pack_dir.exists():
-            pack_png_path = pack_dir / "pack.png"
-            if pack_png_path.exists():
-                try:
-                    preserved_pack_png = pack_png_path.read_bytes()
-                    self._append_log(f"[INFO] 既存の pack.png を退避します: {pack_png_path}")
-                except Exception:
-                    preserved_pack_png = None
-        if pack_dir.exists():
-            shutil.rmtree(pack_dir)
         pack_dir.mkdir(parents=True, exist_ok=True)
         self._apply_template_files(pack_dir)
         assets_dir = pack_dir / "assets"
@@ -955,8 +933,6 @@ $notifier.Show($toast)
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ja_path, target_dir / "ja_jp.json")
         self._write_pack_mcmeta(pack_dir, base_name)
-        if preserved_pack_png is not None:
-            (pack_dir / "pack.png").write_bytes(preserved_pack_png)
         return pack_dir
 
     def _determine_pack_base_name(self, source_path: Path) -> str:
