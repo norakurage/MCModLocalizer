@@ -160,7 +160,6 @@ def translate_batch(
     model: str,
     system_instructions: str,
     _retry_depth: int = 0,
-    stream_handler: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> Tuple[Dict[str, str], UsageStats]:
     payload = json.dumps(items, ensure_ascii=False, indent=2)
     user_text = USER_TEMPLATE.replace("<<PAYLOAD>>", payload)
@@ -241,32 +240,7 @@ def translate_batch(
         if with_response_format:
             args["response_format"] = response_format_schema
         try:
-            if stream_handler:
-                chunks: List[str] = []
-                stream_error: Optional[str] = None
-                with client.responses.stream(**args) as stream:  # type: ignore[arg-type]
-                    for event in stream:
-                        etype = getattr(event, "type", "")
-                        if etype == "response.output_text.delta":
-                            delta = getattr(event, "delta", "") or ""
-                            if delta:
-                                chunks.append(delta)
-                                stream_handler("delta", delta)
-                        elif etype == "response.error":
-                            err = getattr(event, "error", None)
-                            message = ""
-                            if err is not None:
-                                message = getattr(err, "message", "") or str(err)
-                            stream_error = message or "OpenAI streaming error"
-                            if message:
-                                stream_handler("error", message)
-                    resp = stream.get_final_response()
-                if stream_error:
-                    raise RuntimeError(stream_error)
-                out = "".join(chunks)
-            else:
-                resp = client.responses.create(**args)  # type: ignore[arg-type]
-                out = ""
+            resp = client.responses.create(**args)  # type: ignore[arg-type]
         except TypeError:
             if with_response_format:
                 return _call_responses(
@@ -275,8 +249,7 @@ def translate_batch(
                 )
             raise
         usage = _usage_from_response(resp)
-        if not out:
-            out = _extract_text(resp)
+        out = _extract_text(resp)
         last_raw = out or ""
         return _parse_list(out), usage
 
@@ -497,7 +470,6 @@ def translate_localizations(
     progress: Optional[ProgressFn] = None,
     should_stop: Optional[StopFn] = None,
     sleep_interval: float = 0.4,
-    stream_events: Optional[Callable[[str, Optional[str]], None]] = None,
     resume_path: Optional[Path] = None,
 ) -> TranslationResult:
     if should_stop is None:
@@ -587,22 +559,12 @@ def translate_localizations(
         for k, protected in batch:
             kv[k] = (protected, {})
             payload.append({"key": k, "value": protected})
-        if stream_events:
-            stream_events("start", f"バッチ {batch_index}/{total_batches}")
-        def _handle_stream(event: str, payload_text: Optional[str]) -> None:
-            if stream_events:
-                stream_events(event, payload_text)
-        try:
-            out_map, batch_usage = translate_batch(
-                client,
-                payload,
-                model=model,
-                system_instructions=system_instructions,
-                stream_handler=_handle_stream if stream_events else None,
-            )
-        finally:
-            if stream_events:
-                stream_events("end", None)
+        out_map, batch_usage = translate_batch(
+            client,
+            payload,
+            model=model,
+            system_instructions=system_instructions,
+        )
         usage_total.add(batch_usage)
         usage_batches.append(batch_usage)
         for k, (protected2, m) in kv.items():

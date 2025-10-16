@@ -48,7 +48,8 @@ class LocalizeApp:
     def __init__(self, page: ft.Page):
         self.page = page
         self.stop_event = threading.Event()
-        self._streaming_active = False
+        self._log_lines: list[str] = []
+        self._max_log_lines = 500
         # 保存キー
         self.K_API = "openai_api_key"
         self.K_MODEL = "openai_model"
@@ -492,33 +493,21 @@ class LocalizeApp:
     # Log & Progress
     # ------------------------------
     def _append_log(self, msg: str):
-        self.log.value = (self.log.value + ("\n" if self.log.value else "")) + msg
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        raw_lines = msg.splitlines() or [msg]
+        indent = " " * (len(timestamp) + 3)
+        for idx, raw in enumerate(raw_lines):
+            content = raw.strip() if raw.strip() else raw
+            line = f"[{timestamp}] {content}" if idx == 0 else f"{indent}{content}"
+            self._log_lines.append(line)
+        if len(self._log_lines) > self._max_log_lines:
+            self._log_lines = self._log_lines[-self._max_log_lines :]
+        self.log.value = "\n".join(self._log_lines)
+        try:
+            self.log.scroll_to(offset=1.0, duration=0)
+        except Exception:
+            pass
         self.log.update()
-
-    def _stream_start(self, label: str):
-        if self._streaming_active:
-            self._stream_end()
-        if label:
-            self._append_log(f"[LLM] {label}")
-        else:
-            self._append_log("[LLM] 応答を受信中...")
-        self.log.value += " "
-        self.log.update()
-        self._streaming_active = True
-
-    def _stream_chunk(self, chunk: str):
-        if not chunk:
-            return
-        self.log.value += chunk
-        self.log.update()
-
-    def _stream_end(self):
-        if not self._streaming_active:
-            return
-        if not self.log.value.endswith("\n"):
-            self.log.value += "\n"
-            self.log.update()
-        self._streaming_active = False
 
     def _set_progress(self, ratio: float, text: str = ""):
         self.progress.value = max(0.0, min(1.0, ratio))
@@ -800,20 +789,6 @@ $notifier.Show($toast)
                     label = f"{_modid}: {label}" if label else _modid
                     self._set_progress(ratio, label)
 
-                def _stream_event(event: str, payload: str | None, *, _modid: str = modid):
-                    if event == "start":
-                        label = payload or "応答を受信中..."
-                        self._stream_start(f"{_modid} {label}")
-                    elif event == "delta":
-                        if payload:
-                            self._stream_chunk(payload)
-                    elif event == "error":
-                        if payload:
-                            self._stream_chunk(f"(エラー: {payload})")
-                        self._stream_end()
-                    elif event == "end":
-                        self._stream_end()
-
                 pack_lang_path = existing_pack_translations.get(modid)
                 resume_path = resume_root / modid / "ja_jp.json"
                 resume_exists = resume_path.exists()
@@ -843,7 +818,6 @@ $notifier.Show($toast)
                         log=self._append_log,
                         progress=_progress_wrapper,
                         should_stop=self.stop_event.is_set,
-                        stream_events=_stream_event,
                         resume_path=resume_path,
                     )
                     total_entries += result.total
