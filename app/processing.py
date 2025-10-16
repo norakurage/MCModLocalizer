@@ -174,10 +174,16 @@ def translate_batch(
         "json_schema": {
             "name": "translation_list",
             "schema": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": expected_len,
-                "maxItems": expected_len,
+                "type": "object",
+                "properties": {
+                    "translations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": expected_len,
+                        "maxItems": expected_len,
+                    }
+                },
+                "required": ["translations"],
             },
         },
     }
@@ -209,6 +215,8 @@ def translate_batch(
             if isinstance(obj, list):
                 return [str(v) for v in obj]
             if isinstance(obj, dict):
+                if "translations" in obj and isinstance(obj["translations"], list):
+                    return [str(v) for v in obj["translations"]]
                 ordered: List[str] = []
                 for key in unique_keys:
                     if key in obj:
