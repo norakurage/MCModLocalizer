@@ -16,11 +16,11 @@ from xml.sax import saxutils
 
 import flet as ft
 
-from processing import ExtractionResult, extract_localizations, translate_localizations
+from ..services import ExtractionResult, extract_localizations, translate_localizations
 
 APP_NAME = "MC Localizer"
-BASE_DIR = Path(__file__).resolve().parent
-RESOURCE_TEMPLATE_DIR = BASE_DIR / "a"
+APP_ROOT = Path(__file__).resolve().parent.parent
+RESOURCE_TEMPLATE_DIR = APP_ROOT / "a"
 
 try:
     import keyring  # type: ignore
