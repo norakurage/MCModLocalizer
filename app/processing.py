@@ -117,6 +117,17 @@ def _usage_from_response(resp) -> UsageStats:
     return UsageStats(prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
 
 
+def _stream_request(endpoint, **kwargs):
+    stream_callable = getattr(endpoint, "stream", None)
+    if callable(stream_callable):
+        with stream_callable(**kwargs) as stream:
+            for _ in stream:
+                pass
+            return stream.get_final_response()
+    create_callable = getattr(endpoint, "create")
+    return create_callable(**kwargs)
+
+
 def protect_tokens(s: str) -> Tuple[str, Dict[str, str]]:
     mapping: Dict[str, str] = {}
     idx = 0
@@ -240,7 +251,7 @@ def translate_batch(
         if with_response_format:
             args["response_format"] = response_format_schema
         try:
-            resp = client.responses.create(**args)  # type: ignore[arg-type]
+            resp = _stream_request(client.responses, **args)  # type: ignore[arg-type]
         except TypeError:
             if with_response_format:
                 return _call_responses(
@@ -259,7 +270,8 @@ def translate_batch(
             {"role": "system", "content": system_instructions + extra_note},
             {"role": "user", "content": user_text},
         ]
-        resp = client.chat.completions.create(
+        resp = _stream_request(
+            client.chat.completions,
             model=model,
             messages=messages,
             response_format=response_format_schema,

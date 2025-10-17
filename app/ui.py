@@ -50,6 +50,7 @@ class LocalizeApp:
         self.stop_event = threading.Event()
         self._log_lines: list[str] = []
         self._max_log_lines = 500
+        self._auto_scroll_enabled = True
         # 保存キー
         self.K_API = "openai_api_key"
         self.K_MODEL = "openai_model"
@@ -87,6 +88,11 @@ class LocalizeApp:
             min_lines=12,
             max_lines=9999,
             border=ft.InputBorder.OUTLINE,
+        )
+        self.auto_scroll_checkbox = ft.Checkbox(
+            label="ログを自動スクロール",
+            value=True,
+            on_change=self._on_toggle_auto_scroll,
         )
         self.progress = ft.ProgressBar(width=420, value=0)
         self.counter = ft.Text("待機中")
@@ -153,6 +159,7 @@ class LocalizeApp:
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 progress_panel,
+                ft.Row([self.auto_scroll_checkbox], alignment=ft.MainAxisAlignment.END),
                 self.log,
             ],
             expand=True,
@@ -235,7 +242,7 @@ class LocalizeApp:
                     ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.2f}")),
                 ]
             )
-            for record in self.usage_history
+            for record in self.usage_history[-30:]
         ]
         self.token_usage_history_table = ft.DataTable(
             columns=[
@@ -471,7 +478,7 @@ class LocalizeApp:
                     "cost": cost_f,
                 }
             )
-        return history
+        return history[-30:]
 
     def _load_total_cost(self) -> float:
         raw = self._load_value(self.K_USAGE_TOTAL_COST)
@@ -498,7 +505,7 @@ class LocalizeApp:
     def _refresh_usage_history_table(self) -> None:
         rows: list[ft.DataRow] = []
         total_cost = 0.0
-        for record in self.usage_history:
+        for record in self.usage_history[-30:]:
             cost_value = float(record.get("cost", 0.0))
             total_cost += cost_value
             rows.append(
@@ -535,6 +542,9 @@ class LocalizeApp:
     # ------------------------------
     # Log & Progress
     # ------------------------------
+    def _on_toggle_auto_scroll(self, e: ft.ControlEvent):
+        self._auto_scroll_enabled = bool(self.auto_scroll_checkbox.value)
+
     def _append_log(self, msg: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         raw_lines = msg.splitlines() or [msg]
@@ -546,10 +556,11 @@ class LocalizeApp:
         if len(self._log_lines) > self._max_log_lines:
             self._log_lines = self._log_lines[-self._max_log_lines :]
         self.log.value = "\n".join(self._log_lines)
-        try:
-            self.log.scroll_to(offset=1.0, duration=0)
-        except Exception:
-            pass
+        if self._auto_scroll_enabled:
+            try:
+                self.log.scroll_to(offset=1.0, duration=0)
+            except Exception:
+                pass
         self.log.update()
 
     def _set_progress(self, ratio: float, text: str = ""):
@@ -604,9 +615,9 @@ class LocalizeApp:
                     "cost": cost,
                 }
                 self.usage_history.append(record)
-            # keep latest 200 entries to avoid unbounded growth
-            if len(self.usage_history) > 200:
-                self.usage_history = self.usage_history[-200:]
+            # keep latest 30 entries to avoid unbounded growth
+            if len(self.usage_history) > 30:
+                self.usage_history = self.usage_history[-30:]
             self._persist_usage_history()
             self._persist_total_cost()
 
