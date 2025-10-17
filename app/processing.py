@@ -239,8 +239,32 @@ def translate_batch(
         )
         if with_response_format:
             args["response_format"] = response_format_schema
+        text_chunks: List[str] = []
+        final_response = None
+        saw_delta_keys: set[tuple[int, int]] = set()
         try:
-            resp = client.responses.create(**args)  # type: ignore[arg-type]
+            with client.responses.stream(**args) as resp_stream:  # type: ignore[arg-type]
+                for event in resp_stream:
+                    event_type = getattr(event, "type", "")
+                    if event_type == "response.output_text.delta":
+                        key = (getattr(event, "output_index", 0), getattr(event, "content_index", 0))
+                        delta = getattr(event, "delta", "")
+                        if delta:
+                            saw_delta_keys.add(key)
+                            text_chunks.append(str(delta))
+                    elif event_type == "response.output_text.done":
+                        key = (getattr(event, "output_index", 0), getattr(event, "content_index", 0))
+                        if key not in saw_delta_keys:
+                            text = getattr(event, "text", "")
+                            if text:
+                                text_chunks.append(str(text))
+                    elif event_type == "response.completed":
+                        final_response = getattr(event, "response", None)
+                if final_response is None:
+                    try:
+                        final_response = resp_stream.get_final_response()
+                    except Exception:
+                        final_response = None
         except TypeError:
             if with_response_format:
                 return _call_responses(
@@ -248,8 +272,12 @@ def translate_batch(
                     extra_note + "\n出力は必ず『単一の JSON 配列（順番どおりの日本語訳）』のみで返してください。"
                 )
             raise
-        usage = _usage_from_response(resp)
-        out = _extract_text(resp)
+        usage = UsageStats()
+        if final_response is not None:
+            usage = _usage_from_response(final_response)
+        out = "".join(text_chunks)
+        if not out and final_response is not None:
+            out = _extract_text(final_response)
         last_raw = out or ""
         return _parse_list(out), usage
 
