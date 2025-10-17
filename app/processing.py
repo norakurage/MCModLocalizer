@@ -239,8 +239,53 @@ def translate_batch(
         )
         if with_response_format:
             args["response_format"] = response_format_schema
-        try:
+        
+        def _call_streaming() -> Tuple[str, UsageStats]:
+            text_parts: List[str] = []
+            json_parts: List[str] = []
+            usage_stats = UsageStats()
+            final_response = None
+            stream_cm = client.responses.stream(**args)  # type: ignore[arg-type]
+            with stream_cm as stream:
+                for event in stream:
+                    event_type = getattr(event, "type", "")
+                    if event_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", "")
+                        if delta:
+                            text_parts.append(str(delta))
+                    elif event_type == "response.output_json.delta":
+                        delta = getattr(event, "delta", "")
+                        if delta:
+                            json_parts.append(str(delta))
+                    elif event_type == "response.completed":
+                        final_response = getattr(event, "response", None)
+                    elif event_type == "response.failed":
+                        error_obj = getattr(event, "error", None)
+                        raise RuntimeError(f"Response stream failed: {error_obj}")
+                try:
+                    final_response = stream.get_final_response() or final_response
+                except Exception:
+                    final_response = final_response
+            if final_response is not None:
+                usage_stats = _usage_from_response(final_response)
+            out_text = "".join(text_parts) or "".join(json_parts)
+            if not out_text and final_response is not None:
+                out_text = _extract_text(final_response)
+            return out_text, usage_stats
+
+        def _invoke() -> Tuple[str, UsageStats]:
+            if hasattr(client.responses, "stream"):
+                try:
+                    return _call_streaming()
+                except TypeError:
+                    raise
+                except Exception:
+                    pass
             resp = client.responses.create(**args)  # type: ignore[arg-type]
+            return _extract_text(resp), _usage_from_response(resp)
+
+        try:
+            out, usage = _invoke()
         except TypeError:
             if with_response_format:
                 return _call_responses(
@@ -248,8 +293,6 @@ def translate_batch(
                     extra_note + "\n出力は必ず『単一の JSON 配列（順番どおりの日本語訳）』のみで返してください。"
                 )
             raise
-        usage = _usage_from_response(resp)
-        out = _extract_text(resp)
         last_raw = out or ""
         return _parse_list(out), usage
 
