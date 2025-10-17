@@ -369,6 +369,9 @@ class LocalizeApp:
         self.output_dir.update()
         self._save_value(self.K_LAST_OUTPUT_PATH, str(candidate_dir))
         self._remember_dir(self.K_DIR_OUTPUT, candidate_dir)
+        self._append_log(
+            f"[INFO] リソースパックフォルダを自動設定しました: {candidate_dir}"
+        )
 
     def _get_initial_directory(self, key: str) -> str | None:
         stored = self._load_value(key)
