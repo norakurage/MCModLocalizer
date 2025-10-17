@@ -110,10 +110,18 @@ class LocalizeApp:
         self.fp_mods = ft.FilePicker(on_result=self._on_pick_mods_dir)
         self.fp_dir = ft.FilePicker(on_result=self._on_pick_dir)
         self.page.overlay.extend([self.fp_mods, self.fp_dir])
-        pick_mods_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="Mods フォルダを選択",
-                                      on_click=self._open_mods_picker)
-        pick_dir_btn = ft.IconButton(icon=ft.Icons.FOLDER_OPEN, tooltip="出力フォルダを選択",
-                                     on_click=self._open_output_dir_picker)
+        pick_mods_btn = ft.ElevatedButton(
+            "modsフォルダを選択",
+            icon=ft.Icons.FOLDER_OPEN,
+            tooltip="Mods フォルダを選択",
+            on_click=self._open_mods_picker,
+        )
+        pick_dir_btn = ft.ElevatedButton(
+            "リソースパックフォルダを選択",
+            icon=ft.Icons.FOLDER_OPEN,
+            tooltip="出力フォルダを選択",
+            on_click=self._open_output_dir_picker,
+        )
         self.btn_extract = ft.ElevatedButton("抽出 / リソースパック生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
         self.btn_stop = ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=self.on_stop, disabled=True)
         progress_panel = ft.Column(
