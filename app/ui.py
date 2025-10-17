@@ -79,10 +79,19 @@ class LocalizeApp:
         page.window_height = 820
         page.theme_mode = "light"
         # ログ & 進捗
-        self.log = ft.TextField(label="ログ", multiline=True, read_only=True, expand=True,
-                                min_lines=12, max_lines=9999, border=ft.InputBorder.OUTLINE)
+        self.log = ft.TextField(
+            label="ログ",
+            multiline=True,
+            read_only=True,
+            expand=True,
+            min_lines=12,
+            max_lines=9999,
+            border=ft.InputBorder.OUTLINE,
+        )
         self.progress = ft.ProgressBar(width=420, value=0)
         self.counter = ft.Text("待機中")
+        self.detail_progress = ft.ProgressBar(width=420, value=0)
+        self.detail_counter = ft.Text("")
         # -------- 抽出タブ UI --------
         self.mods_dir_path = ft.TextField(
             label="Mods フォルダ（必須）",
@@ -107,12 +116,35 @@ class LocalizeApp:
                                      on_click=self._open_output_dir_picker)
         self.btn_extract = ft.ElevatedButton("抽出 / リソースパック生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
         self.btn_stop = ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=self.on_stop, disabled=True)
+        progress_panel = ft.Column(
+            controls=[
+                ft.Row(
+                    [self.progress, self.counter],
+                    spacing=12,
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [self.detail_progress, self.detail_counter],
+                    spacing=12,
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ],
+            spacing=8,
+        )
         extract_tab = ft.Column(
             controls=[
                 ft.Text("ステップ: JAR から en_us.json を抽出し、ja_jp.json まで自動生成します。", weight=ft.FontWeight.BOLD),
                 ft.Row([self.mods_dir_path, pick_mods_btn], alignment=ft.MainAxisAlignment.START),
                 ft.Row([self.output_dir, pick_dir_btn], alignment=ft.MainAxisAlignment.START),
-                ft.Row([self.btn_extract, self.btn_stop, self.progress, self.counter], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row(
+                    [self.btn_extract, self.btn_stop],
+                    spacing=16,
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                progress_panel,
                 self.log,
             ],
             expand=True,
@@ -512,9 +544,34 @@ class LocalizeApp:
     def _set_progress(self, ratio: float, text: str = ""):
         self.progress.value = max(0.0, min(1.0, ratio))
         self.progress.update()
-        if text:
-            self.counter.value = text
-            self.counter.update()
+        self.counter.value = text or ""
+        self.counter.update()
+
+    def _set_detail_progress(self, ratio: float, text: str = ""):
+        self.detail_progress.value = max(0.0, min(1.0, ratio))
+        self.detail_progress.update()
+        self.detail_counter.value = text or ""
+        self.detail_counter.update()
+
+    @staticmethod
+    def _parse_fraction(text: str) -> tuple[int, int] | None:
+        if "/" not in text:
+            return None
+        left, right = text.split("/", 1)
+        try:
+            return int(left.strip()), int(right.strip())
+        except ValueError:
+            return None
+
+    def _update_extraction_progress(self, ratio: float, text: str):
+        parsed = self._parse_fraction(text)
+        if parsed:
+            done, total = parsed
+            label = f"抽出中: {done}件完了（全{total}件）"
+        else:
+            percent = int(max(0.0, min(1.0, ratio)) * 100)
+            label = f"抽出中: {percent}%"
+        self._set_progress(ratio, label)
 
     def _update_token_usage_ui(self, summary: TranslationSummary):
         pricing = self.model_pricing.get(summary.model)
@@ -634,8 +691,7 @@ $notifier.Show($toast)
         out_dir_value = self.output_dir.value.strip()
         out_dir = Path(out_dir_value) if out_dir_value else None
         if not mods_dir or not mods_dir.exists() or not mods_dir.is_dir():
-            display = mods_dir if mods_dir else "(未指定)"
-            self._append_log(f"[ERROR] Mods フォルダが見つかりません: {display}")
+            self._append_log("[ERROR] Mods フォルダが見つかりません。")
             return
         if out_dir is None:
             self._append_log("[ERROR] 出力フォルダを指定してください。")
@@ -643,7 +699,7 @@ $notifier.Show($toast)
         if not out_dir.exists():
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
-                self._append_log(f"[INFO] 出力フォルダを作成しました: {out_dir}")
+                self._append_log("[INFO] 出力フォルダを作成しました。")
             except Exception as ex:
                 self._append_log(f"[ERROR] 出力フォルダを作成できません: {repr(ex)}")
                 return
@@ -653,23 +709,24 @@ $notifier.Show($toast)
         self._save_value(self.K_LAST_OUTPUT_PATH, str(out_dir))
         self.btn_extract.disabled = True
         self.btn_extract.update()
-        self._set_progress(0.0, "抽出開始")
+        self._set_progress(0.0, "抽出準備中")
 
         def _work():
             temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
             temp_dir_path: Path | None = None
             toast_message = "処理が完了しました。"
             toast_is_error = False
+            self._set_detail_progress(0.0, "")
             try:
                 temp_dir_obj = tempfile.TemporaryDirectory(prefix="mc_localizer_")
                 temp_dir_path = Path(temp_dir_obj.name)
-                self._append_log(f"[INFO] 一時作業フォルダ: {temp_dir_path}")
-                self._append_log(f"[RUN] 抽出: {mods_dir}")
+                self._append_log("[INFO] 一時作業フォルダを準備しました。")
+                self._append_log("[RUN] Mods フォルダから抽出を開始します。")
                 result: ExtractionResult = extract_localizations(
                     mods_dir,
                     temp_dir_path,
                     log=self._append_log,
-                    progress=self._set_progress,
+                    progress=self._update_extraction_progress,
                 )
                 targets: list[tuple[str, Path, dict[str, str]]] = []
                 for modid in result.mod_maps.keys():
@@ -690,9 +747,9 @@ $notifier.Show($toast)
                     elif summary.translated_mods == 0:
                         toast_message = "翻訳対象の ja_jp.json は生成されませんでした。"
                     else:
-                        mod_part = f"{summary.translated_mods}/{summary.total_mods} Mod"
+                        mod_part = f"{summary.total_mods} Mod 中 {summary.translated_mods} Mod"
                         if summary.total_entries:
-                            entry_part = f"、{summary.translated_entries}/{summary.total_entries} 件"
+                            entry_part = f"、{summary.total_entries} 件中 {summary.translated_entries} 件"
                         else:
                             entry_part = ""
                         toast_message = f"翻訳が完了しました ({mod_part}{entry_part})。"
@@ -709,7 +766,7 @@ $notifier.Show($toast)
                 if temp_dir_obj:
                     temp_dir_obj.cleanup()
                     if temp_dir_path:
-                        self._append_log(f"[INFO] 一時作業フォルダを削除しました: {temp_dir_path}")
+                        self._append_log("[INFO] 一時作業フォルダを削除しました。")
                 self.btn_extract.disabled = False
                 self.btn_extract.update()
                 self._show_completion_toast(toast_message, is_error=toast_is_error)
@@ -747,7 +804,7 @@ $notifier.Show($toast)
         model = model.strip()
         if model not in self.available_models:
             model = self.available_models[0]
-        self._append_log(f"[INFO] リソースパック出力先: {output_dir}")
+        self._append_log("[INFO] リソースパック出力先を確認しました。")
         self.stop_event.clear()
         self.btn_stop.disabled = False
         self.btn_stop.update()
@@ -758,6 +815,8 @@ $notifier.Show($toast)
         translated_entries = 0
         pack_dir_path: Path | None = None
         pack_generated_once = False
+        self._set_progress(0.0, "翻訳準備中")
+        self._set_detail_progress(0.0, "")
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_token_count = 0
@@ -778,23 +837,34 @@ $notifier.Show($toast)
                     aborted = True
                     break
                 if not in_path.exists():
-                    self._append_log(f"[WARN] en_us.json が見つかりません: {in_path}")
+                    self._append_log(f"[WARN] en_us.json が見つかりません: {modid}")
                     continue
                 out_path = in_path.parent / "ja_jp.json"
-                self._append_log(f"[RUN] 翻訳 {idx}/{total_targets}: {modid} -> {out_path}")
-                self._set_progress(0.0, f"翻訳 {idx}/{total_targets} ({modid})")
+                completed_mods = idx - 1
+                overall_ratio = completed_mods / total_targets if total_targets else 0.0
+                self._set_progress(
+                    overall_ratio,
+                    f"翻訳中: {completed_mods}件完了（全{total_targets}件）",
+                )
+                self._append_log(f"[RUN] 翻訳を開始します: {modid}")
+                self._set_detail_progress(0.0, f"{modid}: 0%")
 
                 def _progress_wrapper(ratio: float, text: str, *, _modid: str = modid):
-                    label = text.strip()
-                    label = f"{_modid}: {label}" if label else _modid
-                    self._set_progress(ratio, label)
+                    parsed = self._parse_fraction(text.strip())
+                    if parsed:
+                        done, total = parsed
+                        label = f"{_modid}: {done}件完了（全{total}件）"
+                    else:
+                        percent = int(max(0.0, min(1.0, ratio)) * 100)
+                        label = f"{_modid}: {percent}%"
+                    self._set_detail_progress(ratio, label)
 
                 pack_lang_path = existing_pack_translations.get(modid)
                 resume_path = resume_root / modid / "ja_jp.json"
                 resume_exists = resume_path.exists()
                 if resume_exists:
                     self._append_log(
-                        f"[INFO] 中断済みの翻訳ファイルを検出しました。未訳を引き継ぎます: {resume_path}"
+                        f"[INFO] 中断済みの翻訳ファイルを検出しました（{modid}）。未訳を引き継ぎます。"
                     )
                 if (
                     pack_lang_path
@@ -803,9 +873,14 @@ $notifier.Show($toast)
                 ):
                     skipped_existing += 1
                     self._append_log(
-                        f"[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします: {pack_lang_path}"
+                        f"[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします（{modid}）。"
                     )
-                    self._set_progress(1.0, f"{modid}: 既存訳をスキップ")
+                    overall_ratio = idx / total_targets if total_targets else 1.0
+                    self._set_progress(
+                        overall_ratio,
+                        f"翻訳中: {idx}件完了（全{total_targets}件）",
+                    )
+                    self._set_detail_progress(1.0, f"{modid}: 既存訳を使用")
                     continue
 
                 try:
@@ -845,13 +920,19 @@ $notifier.Show($toast)
                         break
                     if out_path.exists():
                         produced.append((modid, out_path))
-                    self._append_log(f"[OK] ja_jp.json を作成しました: {out_path}")
+                    self._append_log(f"[OK] ja_jp.json を作成しました（{modid}）。")
                     pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
                     if pack_dir:
                         pack_dir_path = pack_dir
                         pack_generated_once = True
-                        self._append_log(f"[OK] リソースパックを更新しました ({modid}): {pack_dir}")
+                        self._append_log(f"[OK] リソースパックを更新しました（{modid}）。")
                         _register_pack_contents(pack_dir)
+                    if not aborted:
+                        overall_ratio = idx / total_targets if total_targets else 1.0
+                        self._set_progress(
+                            overall_ratio,
+                            f"翻訳中: {idx}件完了（全{total_targets}件）",
+                        )
                 except Exception as ex:
                     had_error = True
                     self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
@@ -867,10 +948,10 @@ $notifier.Show($toast)
                 pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
                 if pack_dir:
                     pack_dir_path = pack_dir
-                    self._append_log(f"[OK] リソースパックを更新しました: {pack_dir}")
+                    self._append_log(f"[OK] リソースパックを更新しました（{pack_dir.name}）。")
                     pack_png = pack_dir / "pack.png"
                     if not pack_png.exists():
-                        self._append_log(f"[INFO] pack.png は手動で配置してください: {pack_png}")
+                        self._append_log(f"[INFO] pack.png は手動で配置してください（{pack_dir.name}）。")
                     _register_pack_contents(pack_dir)
             except Exception as ex:
                 had_error = True
@@ -912,7 +993,7 @@ $notifier.Show($toast)
     ) -> Path | None:
         if not produced:
             return None
-        self._append_log(f"[INFO] リソースパック生成: 作業フォルダ {temp_dir} を参照します。")
+        self._append_log("[INFO] リソースパック生成を開始します。")
         base_name = self._determine_pack_base_name(source_path)
         if not base_name and produced and produced[0][0]:
             base_name = produced[0][0]
