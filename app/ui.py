@@ -79,6 +79,11 @@ class LocalizeApp:
         page.window_height = 820
         page.theme_mode = "light"
         # ログ & 進捗
+        self.log_auto_scroll_checkbox = ft.Checkbox(
+            label="ログを自動スクロール",
+            value=True,
+            on_change=self._on_log_auto_scroll_toggle,
+        )
         self.log = ft.TextField(
             label="ログ",
             multiline=True,
@@ -153,6 +158,9 @@ class LocalizeApp:
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 progress_panel,
+                ft.Row([
+                    self.log_auto_scroll_checkbox,
+                ], alignment=ft.MainAxisAlignment.END),
                 self.log,
             ],
             expand=True,
@@ -471,6 +479,8 @@ class LocalizeApp:
                     "cost": cost_f,
                 }
             )
+        if len(history) > 30:
+            history = history[-30:]
         return history
 
     def _load_total_cost(self) -> float:
@@ -497,10 +507,9 @@ class LocalizeApp:
 
     def _refresh_usage_history_table(self) -> None:
         rows: list[ft.DataRow] = []
-        total_cost = 0.0
-        for record in self.usage_history:
+        recent_history = self.usage_history[-30:]
+        for record in reversed(recent_history):
             cost_value = float(record.get("cost", 0.0))
-            total_cost += cost_value
             rows.append(
                 ft.DataRow(
                     cells=[
@@ -535,6 +544,14 @@ class LocalizeApp:
     # ------------------------------
     # Log & Progress
     # ------------------------------
+    def _on_log_auto_scroll_toggle(self, e: ft.ControlEvent | None):
+        if not self.log_auto_scroll_checkbox.value:
+            return
+        try:
+            self.log.scroll_to(offset=1.0, duration=0)
+        except Exception:
+            pass
+
     def _append_log(self, msg: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         raw_lines = msg.splitlines() or [msg]
@@ -546,10 +563,11 @@ class LocalizeApp:
         if len(self._log_lines) > self._max_log_lines:
             self._log_lines = self._log_lines[-self._max_log_lines :]
         self.log.value = "\n".join(self._log_lines)
-        try:
-            self.log.scroll_to(offset=1.0, duration=0)
-        except Exception:
-            pass
+        if self.log_auto_scroll_checkbox.value:
+            try:
+                self.log.scroll_to(offset=1.0, duration=0)
+            except Exception:
+                pass
         self.log.update()
 
     def _set_progress(self, ratio: float, text: str = ""):
@@ -604,9 +622,9 @@ class LocalizeApp:
                     "cost": cost,
                 }
                 self.usage_history.append(record)
-            # keep latest 200 entries to avoid unbounded growth
-            if len(self.usage_history) > 200:
-                self.usage_history = self.usage_history[-200:]
+            # keep latest 30 entries to avoid unbounded growth
+            if len(self.usage_history) > 30:
+                self.usage_history = self.usage_history[-30:]
             self._persist_usage_history()
             self._persist_total_cost()
 

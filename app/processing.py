@@ -239,8 +239,20 @@ def translate_batch(
         )
         if with_response_format:
             args["response_format"] = response_format_schema
+        streamed_parts: List[str] = []
         try:
-            resp = client.responses.create(**args)  # type: ignore[arg-type]
+            with client.responses.stream(**args) as stream:  # type: ignore[arg-type]
+                for event in stream:
+                    event_type = getattr(event, "type", "")
+                    if event_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", "")
+                        if delta:
+                            streamed_parts.append(str(delta))
+                    elif event_type == "response.error":
+                        error = getattr(event, "error", None)
+                        message = getattr(error, "message", None) if error else None
+                        raise RuntimeError(message or "OpenAI streaming error")
+                resp = stream.get_final_response()
         except TypeError:
             if with_response_format:
                 return _call_responses(
@@ -250,6 +262,8 @@ def translate_batch(
             raise
         usage = _usage_from_response(resp)
         out = _extract_text(resp)
+        if not out and streamed_parts:
+            out = "".join(streamed_parts)
         last_raw = out or ""
         return _parse_list(out), usage
 
