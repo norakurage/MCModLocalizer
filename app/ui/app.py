@@ -52,9 +52,7 @@ class LocalizeApp:
         self._log_lines: list[str] = []
         self._max_log_lines = 500
         # 保存キー
-        self.K_API = "openai_api_key"
         self.K_MODEL = "openai_model"
-        self.K_SAVE_MODE = "save_mode"  # "keyring" or "local"
         self.K_DIR_MODS = "dir_mods_root"
         self.K_DIR_OUTPUT = "dir_output_pack"
         self.K_LAST_MODS_PATH = "last_mods_dir_path"
@@ -196,11 +194,10 @@ class LocalizeApp:
             on_change=self._on_model_change,
         )
 
-        self.btn_save_settings = ft.ElevatedButton("保存", icon=ft.Icons.SAVE, on_click=self.on_save_settings)
         settings_tab = ft.Column(
             controls=[
                 ft.Text("OpenAI 設定", weight=ft.FontWeight.BOLD),
-                ft.Row([self.model_field, self.btn_config_api_key, self.btn_save_settings], spacing=12),
+                ft.Row([self.model_field, self.btn_config_api_key], spacing=12),
                 ft.Text("ヒント：環境変数 OPENAI_MODEL / OPENAI_API_KEY を設定している場合は、それらも自動的に参照します。"),
                 ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
                 self.model_pricing_table,
@@ -395,20 +392,17 @@ class LocalizeApp:
                     return v
             except Exception:
                 pass
-        v = self._load_value(self.K_API)
-        if v:
-            return v
         return os.getenv("OPENAI_API_KEY")
 
-    def _save_api_key(self, value: str, mode: str):
-        if mode == "keyring" and keyring:
+    def _save_api_key(self, value: str):
+        if keyring:
             try:
                 keyring.set_password(APP_NAME, "OPENAI_API_KEY", value)
-                self.page.client_storage.remove(self.K_API)
                 return
-            except Exception:
-                self._append_log("[WARN] keyring への保存に失敗。ローカル保存にフォールバックします。")
-        self._save_value(self.K_API, value)
+            except Exception as e:
+                self._append_log(f"[ERROR] keyring への保存に失敗しました: {e}")
+        else:
+             self._append_log("[ERROR] keyring モジュールが利用できないため、APIキーを保存できません。")
 
     def _on_model_change(self, e: ft.ControlEvent):
         value = (self.model_field.value or "").strip()
@@ -551,20 +545,25 @@ class LocalizeApp:
 
             def save_dlg(e):
                 key = key_field.value.strip()
-                mode = mode_field.value
                 if not key:
                     key_field.error_text = "API Key を入力してください"
                     key_field.update()
                     return
                 
-                self._save_api_key(key, mode)
-                self._save_value(self.K_SAVE_MODE, mode)
-                self._append_log(f"[OK] API Key を保存しました（保存先: {mode}）。")
+                self._save_api_key(key)
+                self._append_log("[OK] API Key を keyring に保存しました。")
                 dlg.open = False
                 self.page.update()
 
             current_key = self._load_api_key() or ""
-            current_mode = self._load_value(self.K_SAVE_MODE) or ("keyring" if keyring else "local")
+            
+            # Keyringに保存されている場合はフィールドを空にする
+            if keyring:
+                try:
+                    if keyring.get_password(APP_NAME, "OPENAI_API_KEY"):
+                        current_key = ""
+                except Exception:
+                    pass
 
             key_field = ft.TextField(
                 label="OpenAI API Key",
@@ -574,20 +573,12 @@ class LocalizeApp:
                 expand=True,
                 autofocus=True,
             )
-            
-            mode_field = ft.Dropdown(
-                label="保存先",
-                value=current_mode,
-                options=[ft.dropdown.Option("keyring"), ft.dropdown.Option("local")],
-                width=200,
-            )
 
             dlg = ft.AlertDialog(
                 title=ft.Text("API Key 設定"),
                 content=ft.Column([
                     ft.Text("OpenAI API Key を入力してください。"),
                     key_field,
-                    mode_field,
                     ft.Text("※ keyring は OS の資格情報マネージャーを使用します。", size=12, color=ft.Colors.GREY),
                 ], tight=True, width=500),
                 actions=[
@@ -608,15 +599,6 @@ class LocalizeApp:
             self._append_log(f"[ERROR] ダイアログの表示に失敗しました: {repr(ex)}")
             import traceback
             traceback.print_exc()
-
-    def on_save_settings(self, e: ft.ControlEvent):
-        model = self.model_field.value.strip()
-        if model not in self.available_models:
-            model = self.available_models[0]
-            self.model_field.value = model
-            self.model_field.update()
-        self._save_value(self.K_MODEL, model)
-        self._append_log(f"[OK] 設定を保存しました（モデル: {model}）。")
 
     # ------------------------------
     # Log & Progress
