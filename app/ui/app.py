@@ -124,7 +124,8 @@ class LocalizeApp:
         )
         self.btn_extract = ft.ElevatedButton("抽出 / リソースパック生成", icon=ft.Icons.DOWNLOAD, on_click=self.on_extract)
         self.btn_stop = ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=self.on_stop, disabled=True)
-        progress_panel = ft.Column(
+        self.progress_panel = ft.Column(
+            visible=False,
             controls=[
                 ft.Row(
                     [self.progress, self.counter],
@@ -152,7 +153,7 @@ class LocalizeApp:
                     alignment=ft.MainAxisAlignment.START,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                progress_panel,
+                self.progress_panel,
                 self.log,
             ],
             expand=True,
@@ -787,7 +788,9 @@ $notifier.Show($toast)
         self._save_value(self.K_LAST_MODS_PATH, str(mods_dir))
         self._save_value(self.K_LAST_OUTPUT_PATH, str(out_dir))
         self.btn_extract.disabled = True
+        self.progress_panel.visible = True
         self.btn_extract.update()
+        self.progress_panel.update()
         self._set_progress(0.0, "抽出準備中")
 
         def _work():
@@ -847,7 +850,9 @@ $notifier.Show($toast)
                     if temp_dir_path:
                         self._append_log("[INFO] 一時作業フォルダを削除しました。")
                 self.btn_extract.disabled = False
+                self.progress_panel.visible = False
                 self.btn_extract.update()
+                self.progress_panel.update()
                 self._show_completion_toast(toast_message, is_error=toast_is_error)
 
         threading.Thread(target=_work, daemon=True).start()
