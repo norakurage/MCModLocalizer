@@ -79,14 +79,27 @@ class LocalizeApp:
         page.window_height = 820
         page.theme_mode = "light"
         # ログ & 進捗
-        self.log = ft.TextField(
-            label="ログ",
-            multiline=True,
-            read_only=True,
+        self.log_view = ft.ListView(
             expand=True,
-            min_lines=12,
-            max_lines=9999,
-            border=ft.InputBorder.OUTLINE,
+            spacing=2,
+            auto_scroll=True,
+        )
+        self.log_container = ft.Container(
+            content=self.log_view,
+            expand=True,
+            border=ft.border.all(1, ft.Colors.OUTLINE),
+            border_radius=4,
+            padding=5,
+        )
+        self.chk_auto_scroll = ft.Checkbox(
+            label="自動スクロール",
+            value=True,
+            on_change=self._on_change_auto_scroll,
+        )
+        self.btn_copy_log = ft.IconButton(
+            icon=ft.Icons.COPY,
+            tooltip="ログをクリップボードにコピー",
+            on_click=self._on_click_copy_log
         )
         self.progress = ft.ProgressBar(width=420, value=0)
         self.counter = ft.Text("待機中")
@@ -154,7 +167,13 @@ class LocalizeApp:
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 self.progress_panel,
-                self.log,
+                self.progress_panel,
+                ft.Row(
+                    [ft.Text("ログ"), ft.Container(expand=True), self.chk_auto_scroll, self.btn_copy_log],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self.log_container,
             ],
             expand=True,
             spacing=12,
@@ -604,22 +623,38 @@ class LocalizeApp:
     # ------------------------------
     # Log & Progress
     # ------------------------------
+    def _on_change_auto_scroll(self, e: ft.ControlEvent):
+        self.log_view.auto_scroll = e.control.value
+        self.log_view.update()
+
+    def _on_click_copy_log(self, e: ft.ControlEvent):
+        if not self._log_lines:
+            return
+        text = "\n".join(self._log_lines)
+        self.page.set_clipboard(text)
+        self._show_completion_toast("ログをクリップボードにコピーしました")
+
     def _append_log(self, msg: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         raw_lines = msg.splitlines() or [msg]
         indent = " " * (len(timestamp) + 3)
+        
+        new_controls = []
         for idx, raw in enumerate(raw_lines):
             content = raw.strip() if raw.strip() else raw
             line = f"[{timestamp}] {content}" if idx == 0 else f"{indent}{content}"
             self._log_lines.append(line)
+            new_controls.append(ft.Text(line, selectable=True, font_family="Consolas,monospace"))
+
         if len(self._log_lines) > self._max_log_lines:
+            excess = len(self._log_lines) - self._max_log_lines
             self._log_lines = self._log_lines[-self._max_log_lines :]
-        self.log.value = "\n".join(self._log_lines)
-        try:
-            self.log.scroll_to(offset=1.0, duration=0)
-        except Exception:
-            pass
-        self.log.update()
+            for _ in range(excess):
+                if self.log_view.controls:
+                    self.log_view.controls.pop(0)
+
+        self.log_view.controls.extend(new_controls)
+        self.log_view.update()
 
     def _set_progress(self, ratio: float, text: str = ""):
         self.progress.value = max(0.0, min(1.0, ratio))
