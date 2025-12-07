@@ -15,6 +15,7 @@ from pathlib import Path
 from xml.sax import saxutils
 
 import flet as ft
+from plyer import notification
 
 from ..core.usage import UsageStats
 from ..services import ExtractionResult, extract_localizations, translate_localizations
@@ -756,46 +757,15 @@ class LocalizeApp:
         self.token_usage_updated_text.update()
 
     def _show_completion_toast(self, message: str, *, is_error: bool = False):
-        if sys.platform != "win32":
-            return
         try:
-            self._show_windows_toast(APP_NAME, message, is_error=is_error)
+            title = f"{APP_NAME} - エラー" if is_error else APP_NAME
+            notification.notify(
+                title=title,
+                message=message,
+                app_name=APP_NAME,
+            )
         except Exception as ex:
-            self._append_log(f"[WARN] Windowsトーストの表示に失敗しました: {repr(ex)}")
-
-    def _show_windows_toast(self, title: str, message: str, *, is_error: bool = False):
-        if sys.platform != "win32":
-            return
-        body = saxutils.escape(message.replace("\r\n", "\n").replace("\r", "\n")).replace("\n", "&#10;")
-        header_text = f"{title} - エラー" if is_error else title
-        header = saxutils.escape(header_text)
-        visual = f"<toast><visual><binding template='ToastGeneric'><text>{header}</text><text>{body}</text></binding></visual></toast>"
-        script = f"""
-$ErrorActionPreference = 'SilentlyContinue'
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml(@"
-{visual}
-"@)
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(1)
-$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{APP_NAME}')
-$notifier.Show($toast)
-"""
-        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        flags = 0
-        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-            flags |= subprocess.CREATE_NEW_PROCESS_GROUP
-        if hasattr(subprocess, "DETACHED_PROCESS"):
-            flags |= subprocess.DETACHED_PROCESS
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
-            creationflags=flags,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-        )
+            self._append_log(f"[WARN] 通知の表示に失敗しました: {repr(ex)}")
 
     # ------------------------------
     # 抽出フロー
@@ -857,7 +827,7 @@ $notifier.Show($toast)
                     self._update_token_usage_ui(summary)
                     if summary.aborted:
                         toast_message = "翻訳が停止されました。"
-                        toast_is_error = True
+                        toast_is_error = False
                     elif summary.had_error:
                         toast_message = "翻訳処理でエラーが発生しました。ログを確認してください。"
                         toast_is_error = True
