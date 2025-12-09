@@ -20,7 +20,7 @@ from plyer import notification
 from ..core.usage import UsageStats
 from ..services import ExtractionResult, extract_localizations, translate_localizations
 
-APP_NAME = "MC Localizer"
+APP_NAME = "MCModLocalizer"
 BASE_DIR = Path(__file__).resolve().parent.parent
 RESOURCE_TEMPLATE_DIR = BASE_DIR / "a"
 
