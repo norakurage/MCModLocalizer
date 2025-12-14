@@ -15,7 +15,7 @@ from pathlib import Path
 from xml.sax import saxutils
 
 import flet as ft
-from plyer import notification
+
 
 from ..core.usage import UsageStats
 from ..services import ExtractionResult, extract_localizations, translate_localizations
@@ -803,15 +803,9 @@ class LocalizeApp:
         self.token_usage_updated_text.update()
 
     def _show_completion_toast(self, message: str, *, is_error: bool = False):
-        try:
-            title = f"{APP_NAME} - エラー" if is_error else APP_NAME
-            notification.notify(
-                title=title,
-                message=message,
-                app_name=APP_NAME,
-            )
-        except Exception as ex:
-            self._append_log(f"[WARN] 通知の表示に失敗しました: {repr(ex)}")
+        color = ft.Colors.ERROR if is_error else None
+        self.page.snack_bar = ft.SnackBar(ft.Text(message), open=True, bgcolor=color)
+        self.page.update()
 
     # ------------------------------
     # 抽出フロー
