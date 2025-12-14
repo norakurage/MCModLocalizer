@@ -210,7 +210,7 @@ class LocalizeApp:
                 ft.Text("※APIキーは keyring を使用してシステムに安全に保存されます。"),
                 ft.Row([
                     ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
-                    ft.Text(f"最終更新: {self.pricing_version}", italic=True)
+                    ft.Text(f"最終更新: {self.pricing_version}")
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.END),
                 self.model_pricing_table,
                 ft.Divider(),
