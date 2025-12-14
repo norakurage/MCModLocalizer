@@ -71,8 +71,9 @@ class LocalizeApp:
             "gpt-4o-mini": {"input": 0.15, "cached_input": 0.08, "output": 0.60},
         }
         self.available_models = list(self.model_pricing.keys())
-        default_model_env = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        self.default_model = default_model_env if default_model_env in self.available_models else self.available_models[0]
+        self.available_models = list(self.model_pricing.keys())
+        # Default model is just the first available one because we stopped reading environments
+        self.default_model = self.available_models[0]
         # -------------- UI 構築 --------------
         page.title = f"{APP_NAME} (Flet)"
         page.padding = 16
@@ -219,9 +220,12 @@ class LocalizeApp:
             controls=[
                 ft.Text("OpenAI 設定", weight=ft.FontWeight.BOLD),
                 ft.Row([self.model_field, self.btn_config_api_key], spacing=12),
-                ft.Text("ヒント：環境変数 OPENAI_MODEL / OPENAI_API_KEY を設定している場合は、それらも自動的に参照します。"),
+                ft.Text("※APIキーは keyring を使用してシステムに安全に保存されます。"),
                 ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
                 self.model_pricing_table,
+                ft.Divider(),
+                ft.Text("デバッグ・メンテナンス", weight=ft.FontWeight.BOLD),
+                ft.ElevatedButton("アプリを初期化する（設定リセット）", color=ft.Colors.ERROR, on_click=self._on_click_debug_reset),
             ],
             expand=True,
             spacing=12,
@@ -413,7 +417,7 @@ class LocalizeApp:
                     return v
             except Exception:
                 pass
-        return os.getenv("OPENAI_API_KEY")
+        return None
 
     def _save_api_key(self, value: str):
         if keyring:
@@ -620,6 +624,48 @@ class LocalizeApp:
             self._append_log(f"[ERROR] ダイアログの表示に失敗しました: {repr(ex)}")
             import traceback
             traceback.print_exc()
+
+    def _on_click_debug_reset(self, e: ft.ControlEvent):
+        def reset_confirmed(e):
+            # API Key 削除
+            if keyring:
+                try:
+                    keyring.delete_password(APP_NAME, "OPENAI_API_KEY")
+                    self._append_log("[INFO] API Key を削除しました。")
+                except Exception:
+                    pass
+            
+            # Client Storage クリア
+            try:
+                self.page.client_storage.clear()
+                self._append_log("[INFO] アプリ設定(client_storage)をクリアしました。")
+            except Exception as ex:
+                self._append_log(f"[ERROR] 設定クリア失敗: {ex}")
+            
+            # ダイアログを閉じる
+            dlg.open = False
+            self.page.update()
+            
+            # 完了通知
+            self._show_completion_toast("初期化が完了しました。アプリを再起動してください。")
+            self.page.snack_bar = ft.SnackBar(ft.Text("初期化完了。アプリを再起動してください。"), open=True)
+            self.page.update()
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("初期化の確認"),
+            content=ft.Text("すべての設定と履歴を削除します。よろしいですか？\n(APIキー、フォルダ履歴、トークン使用履歴などが消去されます)"),
+            actions=[
+                ft.TextButton("キャンセル", on_click=lambda e: setattr(dlg, 'open', False) or self.page.update()),
+                ft.TextButton("初期化する", on_click=reset_confirmed, style=ft.ButtonStyle(color=ft.Colors.ERROR)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        if hasattr(self.page, "open"):
+            self.page.open(dlg)
+        else:
+            self.page.dialog = dlg
+            dlg.open = True
+            self.page.update()
 
     # ------------------------------
     # Log & Progress
