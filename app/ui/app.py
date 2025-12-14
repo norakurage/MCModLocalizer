@@ -62,18 +62,15 @@ class LocalizeApp:
         self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
         self.K_USAGE_TOTAL_STATS = "token_usage_total_stats"
         # 既定値
-        self.model_pricing = {
-            "gpt-5": {"input": 1.25, "cached_input": 0.13, "output": 10.00},
-            "gpt-5-mini": {"input": 0.25, "cached_input": 0.03, "output": 2.00},
-            "gpt-5-nano": {"input": 0.05, "cached_input": 0.01, "output": 0.40},
-            "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60},
-            "gpt-4.1-nano": {"input": 0.10, "cached_input": 0.03, "output": 0.40},
-            "gpt-4o-mini": {"input": 0.15, "cached_input": 0.08, "output": 0.60},
-        }
-        self.available_models = list(self.model_pricing.keys())
-        self.available_models = list(self.model_pricing.keys())
-        # Default model is just the first available one because we stopped reading environments
-        self.default_model = self.available_models[0]
+        self.model_pricing = {}
+        self.available_models = []
+        self.pricing_version = "-"
+        self._load_model_pricing()
+        # Default model
+        if self.available_models:
+            self.default_model = self.available_models[4]
+        else:
+            self.default_model = "gpt-4.1-nano"
         # -------------- UI 構築 --------------
         page.title = f"{APP_NAME} (Flet)"
         page.padding = 16
@@ -187,17 +184,6 @@ class LocalizeApp:
         
         self.btn_config_api_key = ft.ElevatedButton("APIキー再設定", icon=ft.Icons.KEY, on_click=self._open_api_key_dialog)
         
-        pricing_rows = [
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text(model)),
-                    ft.DataCell(ft.Text(f"${rates['input']:.2f}")),
-                    ft.DataCell(ft.Text(f"${rates['cached_input']:.2f}")),
-                    ft.DataCell(ft.Text(f"${rates['output']:.2f}")),
-                ]
-            )
-            for model, rates in self.model_pricing.items()
-        ]
         self.model_pricing_table = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text("Model")),
@@ -205,8 +191,9 @@ class LocalizeApp:
                 ft.DataColumn(ft.Text("Cached input ($/1M tokens)")),
                 ft.DataColumn(ft.Text("Output ($/1M tokens)")),
             ],
-            rows=pricing_rows,
+            rows=[],
         )
+        self._refresh_pricing_table_ui()
 
         self.model_field = ft.Dropdown(
             label="モデル",
@@ -221,7 +208,10 @@ class LocalizeApp:
                 ft.Text("OpenAI 設定", weight=ft.FontWeight.BOLD),
                 ft.Row([self.model_field, self.btn_config_api_key], spacing=12),
                 ft.Text("※APIキーは keyring を使用してシステムに安全に保存されます。"),
-                ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
+                ft.Row([
+                    ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
+                    ft.Text(f"最終更新: {self.pricing_version}", italic=True)
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.END),
                 self.model_pricing_table,
                 ft.Divider(),
                 ft.Text("デバッグ・メンテナンス", weight=ft.FontWeight.BOLD),
@@ -306,6 +296,48 @@ class LocalizeApp:
 
         if not self._load_api_key():
             self._open_api_key_dialog()
+
+    def _load_model_pricing(self):
+        defaults = {
+            "gpt-5": {"input": 1.25, "cached_input": 0.13, "output": 10.00},
+            "gpt-5-mini": {"input": 0.25, "cached_input": 0.03, "output": 2.00},
+            "gpt-5-nano": {"input": 0.05, "cached_input": 0.01, "output": 0.40},
+            "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60},
+            "gpt-4.1-nano": {"input": 0.10, "cached_input": 0.03, "output": 0.40},
+            "gpt-4o-mini": {"input": 0.15, "cached_input": 0.08, "output": 0.60},
+        }
+        try:
+            path = self._get_bundled_asset_path("pricing.json")
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if "models" in data:
+                        self.model_pricing = data["models"]
+                        self.pricing_version = data.get("version", "-")
+                    else:
+                         self.model_pricing = defaults
+            else:
+                self.model_pricing = defaults
+        except Exception as e:
+            print(f"Failed to load pricing.json: {e}")
+            self.model_pricing = defaults
+            
+        self.available_models = list(self.model_pricing.keys())
+
+    def _refresh_pricing_table_ui(self):
+        self.model_pricing_table.rows = [
+            ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text(model)),
+                    ft.DataCell(ft.Text(f"${rates['input']:.2f}")),
+                    ft.DataCell(ft.Text(f"${rates['cached_input']:.2f}")),
+                    ft.DataCell(ft.Text(f"${rates['output']:.2f}")),
+                ]
+            )
+            for model, rates in self.model_pricing.items()
+        ]
+        if self.model_pricing_table.page:
+            self.model_pricing_table.update()
 
     # ------------------------------
     # FilePicker launchers
