@@ -31,7 +31,11 @@ def _coerce_int(value: object) -> int:
 
 
 def usage_from_response(resp) -> UsageStats:  # type: ignore[no-untyped-def]
-    usage = getattr(resp, "usage", None)
+    if isinstance(resp, dict):
+        usage = resp.get("usage")
+    else:
+        usage = getattr(resp, "usage", None)
+
     if usage is None:
         return UsageStats()
 

@@ -1,9 +1,9 @@
 # MCModLocalizer
 
-Minecraft Mod 向けの `en_us.json` を OpenAI API で日本語化 (`ja_jp.json`) し、差分を尊重しながらリソースパックを構築する Flet 製 GUI アプリです。翻訳時に色コードやプレースホルダーを保護し、既存訳を壊さず不足分のみを補完します。
+Minecraft Mod 向けの `en_us.json` を Google Gemini API で日本語化 (`ja_jp.json`) し、差分を尊重しながらリソースパックを構築する Flet 製 GUI アプリです。翻訳時に色コードやプレースホルダーを保護し、既存訳を壊さず不足分のみを補完します。
 
 ## 主な機能
-- **自動翻訳 & リソースパック生成**: Mod JAR から `en_us.json` を抽出し、OpenAI API で `ja_jp.json` を生成。そのままリソースパック (`<Mod名>_ja_resourcepack`) として出力します。
+- **自動翻訳 & リソースパック生成**: Mod JAR から `en_us.json` を抽出し、Gemini API で `ja_jp.json` を生成。そのままリソースパック (`<Mod名>_ja_resourcepack`) として出力します。
 - **差分翻訳**: 既に日本語ファイルが存在する場合は、未翻訳のエントリーのみを翻訳します。
 - **コンテキスト保護**: `%s` や `§a`、`{name}` のような装飾コードやプレースホルダーを自動保護し、翻訳後に復元します。
 - **コスト管理**: 「トークン」タブで、翻訳に使用したトークン数や概算コスト、履歴を詳細に確認できます。
@@ -13,7 +13,7 @@ Minecraft Mod 向けの `en_us.json` を OpenAI API で日本語化 (`ja_jp.json
 
 ## 必要条件
 - Python 3.10 以上
-- OpenAI アカウントと API キー
+- Google AI Studio (Gemini) の API キー
 - インターネット接続
 
 ## セットアップ
@@ -29,12 +29,11 @@ Minecraft Mod 向けの `en_us.json` を OpenAI API で日本語化 (`ja_jp.json
    ```
    ※ `requirements.txt` がない場合は以下を実行:
    ```powershell
-   pip install "flet>=0.28.3" "openai>=1.14.0" keyring plyer Pillow
+   pip install "flet>=0.28.3" keyring plyer Pillow
    ```
 
-4. OpenAI API キーの設定
+4. Gemini API キーの設定
    - アプリ起動後、「設定」タブから入力し、保存（Keyring に保存されます）。
-   - または環境変数 `OPENAI_API_KEY` を設定しても動作します。
 
 ## 実行方法
 ```powershell
@@ -47,7 +46,7 @@ python main.py
 - **入力フォルダ**: 翻訳したいプロジェクトの Mods フォルダを選択します。
 - **出力フォルダ**: 生成されるリソースパックの保存先を指定します。Mods フォルダを選択すると自動で `resourcepacks` などを推測して設定します。
 - **抽出 / リソースパック生成**: ボタンを押すと処理を開始します。
-  - Mod 内の言語ファイルをスキャン -> OpenAI で翻訳 -> リソースパック生成 という流れで進みます。
+  - Mod 内の言語ファイルをスキャン -> Gemini で翻訳 -> リソースパック生成 という流れで進みます。
   - 処理中は「停止」ボタンで中断可能です（現在のバッチ処理完了後に停止）。
 
 ### 2. トークンタブ
@@ -55,10 +54,11 @@ python main.py
 - **履歴**: 過去の翻訳実行ごとのモデル、トークン数、コストを表形式で確認できます。
 
 ### 3. 設定タブ
-- **OpenAI 設定**: 使用するモデルを選択します。
-  - 対応モデル: `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o-mini` など
+- **API 設定**: 使用するモデルを選択します。
+  - 対応モデル: `gemini-2.5-flash`, `gemini-2.5-flash-lite`
   - モデルごとの単価（入力/出力/キャッシュ）も一覧で確認できます。
-- **API キー**: キーの再設定が可能です。
+- **API キー再設定**: キーの再設定が可能です。
+- **アプリの初期化**: APIキーやトークン利用履歴などを消去します｡
 
 ## 出力されるもの
 指定した出力フォルダに、以下の構成でリソースパックが作成されます。フォルダ名は出力フォルダの親フォルダ名に基づきます（例: `MyModPack/resourcepacks` なら `MyModPack_localize`）。
@@ -75,16 +75,8 @@ python main.py
 
 Minecraft の "Resource Packs" 画面でこれらを有効にすることで、日本語化が適用されます。
 
-## Windows 向け EXE ビルド
-配布用の `.exe` を作成するには、付属のスクリプトを使用します（Windows 環境）。
-
-```powershell
-.\scripts\build_windows_exe.ps1
-```
-`dist/MC Localizer/MC Localizer.exe` が生成されます。
-
 ## トラブルシューティング
-- **翻訳が進まない**: OpenAI の Rate Limit（利用制限）にかかっている可能性があります。時間を空けて試してください。
+- **翻訳が進まない**: Gemini の Rate Limit（利用制限）にかかっている可能性があります。時間を空けて試してください。
 - **通知が出ない**: Windows の集中モードや通知設定を確認してください。
 
 ## ライセンス

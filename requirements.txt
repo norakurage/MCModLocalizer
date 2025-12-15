@@ -1,6 +1,4 @@
 flet>=0.28.3
-openai>=1.14.0
 keyring>=24.3.0
 pyinstaller
-
 PIL

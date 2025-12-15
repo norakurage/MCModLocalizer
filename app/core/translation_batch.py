@@ -6,15 +6,14 @@ import re
 import time
 from typing import Dict, List, Tuple
 
-import openai
-from openai import OpenAI
+
 
 from .constants import USER_TEMPLATE
 from .usage import UsageStats, usage_from_response
 
 
 def translate_batch(
-    client: OpenAI,
+    api_key: str,
     items: List[Dict[str, str]],
     model: str,
     system_instructions: str,
@@ -80,6 +79,9 @@ def translate_batch(
                 return lines[:expected_len]
         return []
 
+    import urllib.request
+    import urllib.error
+
     def _call_chat(extra_note: str = "") -> Tuple[List[str], UsageStats]:
         nonlocal last_raw
         messages = [
@@ -87,64 +89,79 @@ def translate_batch(
             {"role": "user", "content": user_text},
         ]
         
+        request_body = {
+            "model": model,
+            "messages": messages,
+            "response_format": response_format_schema,
+        }
+
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+
+
         max_retries = 5
         retry_delay = 5.0
 
         for attempt in range(max_retries):
             try:
                 print(f"--- [DEBUG] SEND User (Attempt {attempt+1}/{max_retries}) ---\n{user_text}\n-------------------------")
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    response_format=response_format_schema,
-                )
                 
+                data_bytes = json.dumps(request_body).encode("utf-8")
+                req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+                
+                with urllib.request.urlopen(req) as response:
+                    resp_body = response.read().decode("utf-8")
+                    resp = json.loads(resp_body)
+                
+                # Convert dict to usage object or extracting manually
+                # current usage_from_response handles dict inputs
                 usage = usage_from_response(resp)
+                
                 content = ""
-                if getattr(resp, "choices", None):
-                    msg = resp.choices[0].message
-                    content = getattr(msg, "content", None) or ""
+                if "choices" in resp and len(resp["choices"]) > 0:
+                    content = resp["choices"][0].get("message", {}).get("content", "") or ""
                     print(f"--- [DEBUG] RECV Assistant ---\n{content}\n-----------------------------")
+                
                 last_raw = content or ""
                 return _parse_list(content or ""), usage
 
-            except openai.RateLimitError as e:
-                if attempt == max_retries - 1:
-                    print(f"--- [ERROR] Rate limit exceeded after {max_retries} attempts.")
-                    raise
-                
-                # Extract wait time from error message
-                wait_time = retry_delay
-                try:
-                    # Look for "Please retry in X s"
-                    m = re.search(r"Please retry in ([0-9\.]+)s", str(e))
-                    if m:
-                        wait_time = float(m.group(1)) + 1.0 # Add buffer
-                    else:
-                        # Look for retryDelay in details if accessible roughly
-                        m2 = re.search(r"'retryDelay':\s*'([0-9\.]+)s'", str(e))
-                        if m2:
-                             wait_time = float(m2.group(1)) + 1.0
-                except Exception:
-                    pass
-                
-                # Use the larger of the calculated backoff or the suggested wait time
-                actual_wait = max(wait_time, retry_delay)
+            except urllib.error.HTTPError as e:
+                # 429 Too Many Requests -> Rate Limit
+                if e.code == 429:
+                    if attempt == max_retries - 1:
+                        print(f"--- [ERROR] Rate limit exceeded after {max_retries} attempts.")
+                        raise
 
-                print(f"--- [WARN] Rate limit hit. Waiting {actual_wait:.2f}s... (Attempt {attempt+1}/{max_retries})")
-                time.sleep(actual_wait)
-                
-                if actual_wait > retry_delay:
-                    # If we had to wait longer than the backoff, reset/adjust backoff to avoid instant next fail
-                     retry_delay = actual_wait * 2
-                else:
+                    wait_time = retry_delay
+                    try:
+                         # Try to find something in the error output? usually simpler to just retry with backoff
+                         pass
+                    except Exception:
+                        pass
+                    
+                    actual_wait = max(wait_time, retry_delay)
+                    print(f"--- [WARN] Rate limit hit (429). Waiting {actual_wait:.2f}s... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(actual_wait)
+                    
                     retry_delay *= 2
-            
-            except openai.APIError as e:
-                # Handle other transient API errors if needed, but RateLimit is the main one for Gemini Free Tier
+                    continue
+                
+                # Other HTTP errors
                 if attempt == max_retries - 1:
                     raise
-                print(f"--- [WARN] API Error: {e}. Retrying in {retry_delay}s...")
+                print(f"--- [WARN] HTTP Error {e.code}: {e.reason}. Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+            
+            except Exception as e:
+                # Network errors etc.
+                if attempt == max_retries - 1:
+                    raise
+                print(f"--- [WARN] Error: {e}. Retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
                 retry_delay *= 2
 
@@ -166,7 +183,7 @@ def translate_batch(
             subset_items: List[Dict[str, str]] = items[start_index:]
             if subset_items:
                 subset_map, subset_usage = translate_batch(
-                    client,
+                    api_key,
                     subset_items,
                     model,
                     system_instructions,

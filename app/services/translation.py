@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from openai import OpenAI
 
 from ..core import SYSTEM_INSTRUCTIONS_BASE, protect_tokens, restore_tokens
 from ..core.chunking import chunk_pairs
@@ -113,10 +112,7 @@ def translate_localizations(
         return TranslationResult(total=0, created=0, out_path=out_path, stopped=False)
     system_instructions = SYSTEM_INSTRUCTIONS_BASE
     
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-    )
+
 
     created = 0
     stopped = False
@@ -136,7 +132,7 @@ def translate_localizations(
             kv[k] = (protected, {})
             payload.append({"key": k, "value": protected})
         out_map, batch_usage = translate_batch(
-            client,
+            api_key,
             payload,
             model=model,
             system_instructions=system_instructions,
