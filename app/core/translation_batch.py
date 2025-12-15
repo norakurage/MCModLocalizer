@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Dict, List, Tuple
 
+import openai
 from openai import OpenAI
 
 from .constants import USER_TEMPLATE
@@ -84,20 +86,70 @@ def translate_batch(
             {"role": "system", "content": system_instructions + extra_note},
             {"role": "user", "content": user_text},
         ]
-        print(f"--- [DEBUG] SEND User ---\n{user_text}\n-------------------------")
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format=response_format_schema,
-        )
-        usage = usage_from_response(resp)
-        content = ""
-        if getattr(resp, "choices", None):
-            msg = resp.choices[0].message
-            content = getattr(msg, "content", None) or ""
-            print(f"--- [DEBUG] RECV Assistant ---\n{content}\n-----------------------------")
-        last_raw = content or ""
-        return _parse_list(content or ""), usage
+        
+        max_retries = 5
+        retry_delay = 5.0
+
+        for attempt in range(max_retries):
+            try:
+                print(f"--- [DEBUG] SEND User (Attempt {attempt+1}/{max_retries}) ---\n{user_text}\n-------------------------")
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    response_format=response_format_schema,
+                )
+                
+                usage = usage_from_response(resp)
+                content = ""
+                if getattr(resp, "choices", None):
+                    msg = resp.choices[0].message
+                    content = getattr(msg, "content", None) or ""
+                    print(f"--- [DEBUG] RECV Assistant ---\n{content}\n-----------------------------")
+                last_raw = content or ""
+                return _parse_list(content or ""), usage
+
+            except openai.RateLimitError as e:
+                if attempt == max_retries - 1:
+                    print(f"--- [ERROR] Rate limit exceeded after {max_retries} attempts.")
+                    raise
+                
+                # Extract wait time from error message
+                wait_time = retry_delay
+                try:
+                    # Look for "Please retry in X s"
+                    m = re.search(r"Please retry in ([0-9\.]+)s", str(e))
+                    if m:
+                        wait_time = float(m.group(1)) + 1.0 # Add buffer
+                    else:
+                        # Look for retryDelay in details if accessible roughly
+                        m2 = re.search(r"'retryDelay':\s*'([0-9\.]+)s'", str(e))
+                        if m2:
+                             wait_time = float(m2.group(1)) + 1.0
+                except Exception:
+                    pass
+                
+                # Use the larger of the calculated backoff or the suggested wait time
+                actual_wait = max(wait_time, retry_delay)
+
+                print(f"--- [WARN] Rate limit hit. Waiting {actual_wait:.2f}s... (Attempt {attempt+1}/{max_retries})")
+                time.sleep(actual_wait)
+                
+                if actual_wait > retry_delay:
+                    # If we had to wait longer than the backoff, reset/adjust backoff to avoid instant next fail
+                     retry_delay = actual_wait * 2
+                else:
+                    retry_delay *= 2
+            
+            except openai.APIError as e:
+                # Handle other transient API errors if needed, but RateLimit is the main one for Gemini Free Tier
+                if attempt == max_retries - 1:
+                    raise
+                print(f"--- [WARN] API Error: {e}. Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+
+        # Should not maximize here due to raises
+        return [], UsageStats()
 
     data_list, usage = _call_chat()
     if len(data_list) < expected_len:

@@ -112,7 +112,12 @@ def translate_localizations(
                 pass
         return TranslationResult(total=0, created=0, out_path=out_path, stopped=False)
     system_instructions = SYSTEM_INSTRUCTIONS_BASE
-    client = OpenAI(api_key=api_key)
+    
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
+
     created = 0
     stopped = False
     usage_total = UsageStats()
