@@ -60,17 +60,19 @@ class LocalizeApp:
         self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
         self.K_USAGE_HISTORY = "token_usage_history"
         self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
+        self.K_USAGE_HISTORY = "token_usage_history"
+        self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
         self.K_USAGE_TOTAL_STATS = "token_usage_total_stats"
+        # API Keys
+        # API Keys
+        self.K_KEY_GEMINI = "GEMINI_API_KEY"
         # 既定値
         self.model_pricing = {}
         self.available_models = []
         self.pricing_version = "-"
         self._load_model_pricing()
         # Default model
-        if self.available_models:
-            self.default_model = self.available_models[4]
-        else:
-            self.default_model = "gpt-4.1-nano"
+        self.default_model = "gemini-2.5-flash-lite"
         # -------------- UI 構築 --------------
         page.title = f"{APP_NAME} (Flet)"
         page.padding = 16
@@ -205,7 +207,7 @@ class LocalizeApp:
 
         settings_tab = ft.Column(
             controls=[
-                ft.Text("OpenAI 設定", weight=ft.FontWeight.BOLD),
+                ft.Text("API 設定", weight=ft.FontWeight.BOLD),
                 ft.Row([self.model_field, self.btn_config_api_key], spacing=12),
                 ft.Text("※APIキーは keyring を使用してシステムに安全に保存されます。"),
                 ft.Row([
@@ -230,26 +232,13 @@ class LocalizeApp:
         self.total_cost = self._load_total_cost()
         self.token_usage_cost_text = ft.Text(f"概算コスト累計: ${self.total_cost:.3f}")
         self.token_usage_updated_text = ft.Text("更新時刻: -")
-        history_rows = [
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text(str(record.get("timestamp", "-")))),
-                    ft.DataCell(ft.Text(str(record.get("model", "-")))),
-                    ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
-                    ft.DataCell(ft.Text(str(record.get("completion", 0)))),
-                    ft.DataCell(ft.Text(str(record.get("total", 0)))),
-                    ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.3f}")),
-                ]
-            )
-            for record in self.usage_history
-        ]
+        history_rows = self._generate_history_rows()
         self.token_usage_history_table = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text("日時")),
                 ft.DataColumn(ft.Text("モデル")),
                 ft.DataColumn(ft.Text("入力トークン")),
                 ft.DataColumn(ft.Text("出力トークン")),
-                ft.DataColumn(ft.Text("合計")),
                 ft.DataColumn(ft.Text("概算コスト")),
             ],
             rows=history_rows,
@@ -257,7 +246,7 @@ class LocalizeApp:
         )
         token_tab = ft.Column(
             controls=[
-                ft.Text("OpenAI API のトークン使用量を確認します。", weight=ft.FontWeight.BOLD),
+                ft.Text("API のトークン使用量を確認します。", weight=ft.FontWeight.BOLD),
                 self.token_usage_summary,
                 self.token_usage_prompt_text,
                 self.token_usage_completion_text,
@@ -299,12 +288,10 @@ class LocalizeApp:
 
     def _load_model_pricing(self):
         defaults = {
-            "gpt-5": {"input": 1.25, "cached_input": 0.13, "output": 10.00},
-            "gpt-5-mini": {"input": 0.25, "cached_input": 0.03, "output": 2.00},
-            "gpt-5-nano": {"input": 0.05, "cached_input": 0.01, "output": 0.40},
-            "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60},
-            "gpt-4.1-nano": {"input": 0.10, "cached_input": 0.03, "output": 0.40},
-            "gpt-4o-mini": {"input": 0.15, "cached_input": 0.08, "output": 0.60},
+            "gemini-2.0-flash-exp": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+            "gemini-1.5-flash": {"input": 0.075, "cached_input": 0.01875, "output": 0.30},
+            "gemini-1.5-pro": {"input": 1.25, "cached_input": 0.3125, "output": 5.00},
+            "gemini-1.5-flash-8b": {"input": 0.0375, "cached_input": 0.01, "output": 0.15},
         }
         try:
             path = self._get_bundled_asset_path("pricing.json")
@@ -442,9 +429,10 @@ class LocalizeApp:
         return None
 
     def _load_api_key(self) -> str | None:
+        key_name = self.K_KEY_GEMINI
         if keyring:
             try:
-                v = keyring.get_password(APP_NAME, "OPENAI_API_KEY")
+                v = keyring.get_password(APP_NAME, key_name)
                 if v:
                     return v
             except Exception:
@@ -452,9 +440,10 @@ class LocalizeApp:
         return None
 
     def _save_api_key(self, value: str):
+        key_name = self.K_KEY_GEMINI
         if keyring:
             try:
-                keyring.set_password(APP_NAME, "OPENAI_API_KEY", value)
+                keyring.set_password(APP_NAME, key_name, value)
                 return
             except Exception as e:
                 self._append_log(f"[ERROR] keyring への保存に失敗しました: {e}")
@@ -571,71 +560,84 @@ class LocalizeApp:
         except Exception as ex:
             self._append_log(f"[WARN] トークン累計使用量の保存に失敗しました: {repr(ex)}")
 
-    def _refresh_usage_history_table(self) -> None:
-        rows: list[ft.DataRow] = []
-        total_cost = 0.0
+    def _generate_history_rows(self) -> list[ft.DataRow]:
+        grouped: dict[tuple[str, str], dict] = {}
         for record in self.usage_history:
-            cost_value = float(record.get("cost", 0.0))
-            total_cost += cost_value
-            rows.append(
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(ft.Text(str(record.get("timestamp", "-")))),
-                        ft.DataCell(ft.Text(str(record.get("model", "-")))),
-                        ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
-                        ft.DataCell(ft.Text(str(record.get("completion", 0)))),
-                        ft.DataCell(ft.Text(str(record.get("total", 0)))),
-                        ft.DataCell(ft.Text(f"${cost_value:.3f}")),
-                    ]
-                )
+            ts = str(record.get("timestamp", "-"))
+            model = str(record.get("model", "-"))
+            key = (ts, model)
+            
+            p = int(record.get("prompt", 0))
+            c = int(record.get("completion", 0))
+            cost = float(record.get("cost", 0.0))
+            
+            if key not in grouped:
+                grouped[key] = {
+                    "timestamp": ts,
+                    "model": model,
+                    "prompt": 0,
+                    "completion": 0,
+                    "cost": 0.0,
+                }
+            
+            grouped[key]["prompt"] += p
+            grouped[key]["completion"] += c
+            grouped[key]["cost"] += cost
+            
+        return [
+            ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text(data["timestamp"])),
+                    ft.DataCell(ft.Text(data["model"])),
+                    ft.DataCell(ft.Text(str(data["prompt"]))),
+                    ft.DataCell(ft.Text(str(data["completion"]))),
+                    ft.DataCell(ft.Text(f"${data['cost']:.3f}")),
+                ]
             )
-        self.token_usage_history_table.rows = rows
+            for data in grouped.values()
+        ]
+
+    def _refresh_usage_history_table(self) -> None:
+        self.token_usage_history_table.rows = self._generate_history_rows()
         self.token_usage_history_table.update()
 
     def _open_api_key_dialog(self, e=None):
         try:
-            self._append_log("[DEBUG] API設定ダイアログを開きます...")
+
             
             def close_dlg(e):
                 dlg.open = False
                 self.page.update()
 
             def save_dlg(e):
-                key = key_field.value.strip()
-                if not key:
-                    key_field.error_text = "API Key を入力してください"
-                    key_field.update()
-                    return
+                val_gemini = key_field_gemini.value.strip()
+
+                if val_gemini:
+                    self._save_api_key(val_gemini)
                 
-                self._save_api_key(key)
-                self._append_log("[OK] API Key を keyring に保存しました。")
+                self._append_log("[OK] 設定された API Key を keyring に保存しました。")
                 dlg.open = False
                 self.page.update()
 
-            current_key = self._load_api_key() or ""
+            # 現在設定されているかどうかだけ確認（セキュリティのため値は表示しない）
+            has_gemini = bool(self._load_api_key())
             
-            # Keyringに保存されている場合はフィールドを空にする
-            if keyring:
-                try:
-                    if keyring.get_password(APP_NAME, "OPENAI_API_KEY"):
-                        current_key = ""
-                except Exception:
-                    pass
+            label_text = "Gemini API Key (設定済み)" if has_gemini else "Gemini API Key"
 
-            key_field = ft.TextField(
-                label="OpenAI API Key",
+            key_field_gemini = ft.TextField(
+                label=label_text,
                 password=True,
                 can_reveal_password=True,
-                value=current_key,
+                value="",
+                hint_text="設定済み (変更しない場合は空欄)" if has_gemini else "未設定",
                 expand=True,
-                autofocus=True,
             )
 
             dlg = ft.AlertDialog(
                 title=ft.Text("API Key 設定"),
                 content=ft.Column([
-                    ft.Text("OpenAI API Key を入力してください。"),
-                    key_field,
+                    ft.Text("使用するモデルに対応する API Key を設定してください。"),
+                    key_field_gemini,
                     ft.Text("※ keyring は OS の資格情報マネージャーを使用します。", size=12, color=ft.Colors.GREY),
                 ], tight=True, width=500),
                 actions=[
@@ -662,7 +664,7 @@ class LocalizeApp:
             # API Key 削除
             if keyring:
                 try:
-                    keyring.delete_password(APP_NAME, "OPENAI_API_KEY")
+                    keyring.delete_password(APP_NAME, self.K_KEY_GEMINI)
                     self._append_log("[INFO] API Key を削除しました。")
                 except Exception:
                     pass
@@ -942,9 +944,16 @@ class LocalizeApp:
         output_dir: Path,
     ) -> TranslationSummary:
         total_targets = len(targets)
+        
+        model = self.model_field.value or self._load_value(self.K_MODEL) or self.default_model
+        model = model.strip()
+        if model not in self.available_models:
+            model = self.available_models[0]
+            
         api_key = self._load_api_key()
+        
         if not api_key:
-            self._append_log("[ERROR] API キーが未設定です。設定タブで保存してください。")
+            self._append_log(f"[ERROR] API キーが未設定です。設定タブで保存してください。")
             self.tabs.selected_index = 1
             self.tabs.update()
             return TranslationSummary(
@@ -961,10 +970,7 @@ class LocalizeApp:
                 model="",
                 usage_records=[],
             )
-        model = self.model_field.value or self._load_value(self.K_MODEL) or self.default_model
-        model = model.strip()
-        if model not in self.available_models:
-            model = self.available_models[0]
+        # model load moved up
         self._append_log("[INFO] リソースパック出力先を確認しました。")
         self.stop_event.clear()
         self.btn_stop.disabled = False
