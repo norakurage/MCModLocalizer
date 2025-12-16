@@ -682,8 +682,7 @@ class LocalizeApp:
             
             # 完了通知
             self._show_completion_toast("初期化が完了しました。アプリを再起動してください。")
-            self.page.snack_bar = ft.SnackBar(ft.Text("初期化完了。アプリを再起動してください。"), open=True)
-            self.page.update()
+
 
         dlg = ft.AlertDialog(
             title=ft.Text("初期化の確認"),
@@ -838,8 +837,14 @@ class LocalizeApp:
 
     def _show_completion_toast(self, message: str, *, is_error: bool = False):
         color = ft.Colors.ERROR if is_error else None
-        self.page.snack_bar = ft.SnackBar(ft.Text(message), open=True, bgcolor=color)
-        self.page.update()
+        snack = ft.SnackBar(ft.Text(message), bgcolor=color)
+        if hasattr(self.page, "open"):
+            self.page.open(snack)
+        else:
+            snack.open = True
+            self.page.snack_bar = snack
+            self.page.update()
+
 
     # ------------------------------
     # 抽出フロー
