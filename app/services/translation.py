@@ -136,6 +136,7 @@ def translate_localizations(
             payload,
             model=model,
             system_instructions=system_instructions,
+            log_fn=log,
         )
         usage_total.add(batch_usage)
         usage_batches.append(batch_usage)

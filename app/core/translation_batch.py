@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 
@@ -17,6 +17,7 @@ def translate_batch(
     items: List[Dict[str, str]],
     model: str,
     system_instructions: str,
+    log_fn: Optional[Callable[[str], None]] = None,
     _retry_depth: int = 0,
 ) -> Tuple[Dict[str, str], UsageStats]:
     values = [item["value"] for item in items]
@@ -130,38 +131,65 @@ def translate_batch(
                 return _parse_list(content or ""), usage
 
             except urllib.error.HTTPError as e:
-                # 429 Too Many Requests -> Rate Limit
-                if e.code == 429:
-                    if attempt == max_retries - 1:
-                        print(f"--- [ERROR] Rate limit exceeded after {max_retries} attempts.")
-                        raise
-
-                    wait_time = retry_delay
-                    try:
-                         # Try to find something in the error output? usually simpler to just retry with backoff
-                         pass
-                    except Exception:
-                        pass
-                    
-                    actual_wait = max(wait_time, retry_delay)
-                    print(f"--- [WARN] Rate limit hit (429). Waiting {actual_wait:.2f}s... (Attempt {attempt+1}/{max_retries})")
-                    time.sleep(actual_wait)
-                    
-                    retry_delay *= 2
-                    continue
-                
-                # Other HTTP errors
-                if attempt == max_retries - 1:
+                # Immediate failure conditions
+                if e.code in (400, 401, 403):
+                    print(f"--- [ERROR] Immediate failure HTTP {e.code}: {e.reason}")
                     raise
-                print(f"--- [WARN] HTTP Error {e.code}: {e.reason}. Retrying in {retry_delay}s...")
-                time.sleep(retry_delay)
+
+                # Retry conditions (429, 500, 502, 503) or others
+                # Though we specifically target 429/5xx, general retry for others is safer unless specified otherwise.
+                # But here we focus on the requirement.
+                
+                # Check if it's a retryable error
+                is_retryable = e.code in (429, 500, 502, 503)
+                
+                if not is_retryable:
+                    # If it's not in the explicit retry list AND not in the immediate fail list,
+                    # we have to decide. Given the user requirement implies a split, 
+                    # let's assume anything else is also immediate failure or maybe just fail to be safe?
+                    # "400 / 401 / 403 -> Immediate"
+                    # "429 / 500 / 502 / 503 -> Retry"
+                    # Default: Let's treat valid 4xx (client error) as immediate fail if not 429?
+                    # But to be safe and robust, usually we only retry transient errors.
+                    # 404? 405? -> fail.
+                    pass 
+                    
+                # If we are here, we are either 429, 5xx, or decided to retry?
+                # Actually, let's strictly follow the user's implicit "Retry these, Fail those" logic.
+                # If it's 429 or 5xx, we retry.
+                
+                should_retry = e.code in (429, 500, 502, 503)
+                
+                if not should_retry:
+                    # Fallback for unhandled codes -> Raise
+                     print(f"--- [ERROR] Unhandled HTTP {e.code}: {e.reason}")
+                     raise
+
+                # Retry logic
+                if attempt == max_retries - 1:
+                    msg = f"[ERROR] Retry limit exceeded for HTTP {e.code}."
+                    print(f"--- {msg}")
+                    # raise the original error
+                    raise
+
+                wait_time = retry_delay
+                actual_wait = max(wait_time, retry_delay)
+                msg = f"[WARN] HTTP {e.code} ({e.reason}). Waiting {actual_wait:.2f}s... (Attempt {attempt+1}/{max_retries})"
+                print(f"--- {msg}")
+                if log_fn:
+                    log_fn(msg)
+                time.sleep(actual_wait)
+                
                 retry_delay *= 2
             
             except Exception as e:
                 # Network errors etc.
                 if attempt == max_retries - 1:
                     raise
-                print(f"--- [WARN] Error: {e}. Retrying in {retry_delay}s...")
+                msg = f"[WARN] Error: {e}. Retrying in {retry_delay}s..."
+                print(f"--- {msg}")
+                if log_fn:
+                    log_fn(msg)
                 time.sleep(retry_delay)
                 retry_delay *= 2
 
@@ -187,6 +215,7 @@ def translate_batch(
                     subset_items,
                     model,
                     system_instructions,
+                    log_fn=log_fn,
                     _retry_depth=_retry_depth + 1,
                 )
                 usage.add(subset_usage)
