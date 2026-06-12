@@ -5,7 +5,6 @@ import sys
 import tempfile
 import threading
 import traceback
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -16,9 +15,10 @@ from ..core.usage import UsageStats, estimate_cost
 from ..services import (
     ExtractionResult,
     ResourcePackBuilder,
-    collect_pack_translations,
+    TranslationSummary,
     extract_localizations,
-    translate_localizations,
+    parse_fraction,
+    run_translation_jobs,
 )
 
 APP_NAME = "MCModLocalizer"
@@ -29,22 +29,6 @@ try:
     import keyring  # type: ignore
 except Exception:
     keyring = None
-
-
-@dataclass
-class TranslationSummary:
-    translated_mods: int
-    total_mods: int
-    translated_entries: int
-    total_entries: int
-    aborted: bool
-    had_error: bool
-    pack_dir: Path | None
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    model: str = ""
-    usage_records: list[tuple[int, int, int]] = field(default_factory=list)
 
 
 class LocalizeApp:
@@ -750,18 +734,8 @@ class LocalizeApp:
         self.detail_counter.value = text or ""
         self.detail_counter.update()
 
-    @staticmethod
-    def _parse_fraction(text: str) -> tuple[int, int] | None:
-        if "/" not in text:
-            return None
-        left, right = text.split("/", 1)
-        try:
-            return int(left.strip()), int(right.strip())
-        except ValueError:
-            return None
-
     def _update_extraction_progress(self, ratio: float, text: str):
-        parsed = self._parse_fraction(text)
+        parsed = parse_fraction(text)
         if parsed:
             done, total = parsed
             label = f"抽出中: {done}件完了（全{total}件）"
@@ -943,209 +917,46 @@ class LocalizeApp:
         targets: list[tuple[str, Path, dict[str, str]]],
         output_dir: Path,
     ) -> TranslationSummary:
-        total_targets = len(targets)
-        
         model = self.model_field.value or self._load_value(self.K_MODEL) or self.default_model
         model = model.strip()
         if model not in self.available_models:
             model = self.available_models[0]
-            
+
         api_key = self._load_api_key()
-        
         if not api_key:
-            self._append_log(f"[ERROR] API キーが未設定です。設定タブで保存してください。")
+            self._append_log("[ERROR] API キーが未設定です。設定タブで保存してください。")
             self.tabs.selected_index = 1
             self.tabs.update()
             return TranslationSummary(
                 translated_mods=0,
-                total_mods=total_targets,
+                total_mods=len(targets),
                 translated_entries=0,
                 total_entries=0,
                 aborted=False,
                 had_error=True,
                 pack_dir=None,
-                prompt_tokens=0,
-                completion_tokens=0,
-                total_tokens=0,
-                model="",
-                usage_records=[],
             )
-        # model load moved up
+
         self._append_log("[INFO] リソースパック出力先を確認しました。")
         self.stop_event.clear()
         self.btn_stop.disabled = False
         self.btn_stop.update()
-        produced: list[tuple[str, Path]] = []
-        aborted = False
-        had_error = False
-        total_entries = 0
-        translated_entries = 0
-        pack_dir_path: Path | None = None
-        pack_generated_once = False
-        self._set_progress(0.0, "翻訳準備中")
-        self._set_detail_progress(0.0, "")
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_token_count = 0
-        usage_records: list[tuple[int, int, int]] = []
-        existing_pack_translations = collect_pack_translations(output_dir)
-        resume_root = output_dir / ".resume"
-        skipped_existing = 0
-
-        def _register_pack_contents(pack_root: Path | None):
-            if not pack_root:
-                return
-            for mod_name, lang_path in collect_pack_translations(pack_root).items():
-                existing_pack_translations[mod_name] = lang_path
-
         try:
-            for idx, (modid, in_path, existing_ja) in enumerate(targets, start=1):
-                if self.stop_event.is_set():
-                    aborted = True
-                    break
-                if not in_path.exists():
-                    self._append_log(f"[WARN] en_us.json が見つかりません: {modid}")
-                    continue
-                out_path = in_path.parent / "ja_jp.json"
-                completed_mods = idx - 1
-                overall_ratio = completed_mods / total_targets if total_targets else 0.0
-                self._set_progress(
-                    overall_ratio,
-                    f"翻訳中: {completed_mods}件完了（全{total_targets}件）",
-                )
-                self._append_log(f"[RUN] 翻訳を開始します: {modid}")
-                self._set_detail_progress(0.0, f"{modid}: 0%")
-
-                def _progress_wrapper(ratio: float, text: str, *, _modid: str = modid):
-                    parsed = self._parse_fraction(text.strip())
-                    if parsed:
-                        done, total = parsed
-                        label = f"{_modid}: {done}件完了（全{total}件）"
-                    else:
-                        percent = int(max(0.0, min(1.0, ratio)) * 100)
-                        label = f"{_modid}: {percent}%"
-                    self._set_detail_progress(ratio, label)
-
-                pack_lang_path = existing_pack_translations.get(modid)
-                resume_path = resume_root / modid / "ja_jp.json"
-                resume_exists = resume_path.exists()
-                if resume_exists:
-                    self._append_log(
-                        f"[INFO] 中断済みの翻訳ファイルを検出しました（{modid}）。未訳を引き継ぎます。"
-                    )
-                if (
-                    pack_lang_path
-                    and pack_lang_path.exists()
-                    and resume_root not in pack_lang_path.parents
-                ):
-                    skipped_existing += 1
-                    self._append_log(
-                        f"[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします（{modid}）。"
-                    )
-                    overall_ratio = idx / total_targets if total_targets else 1.0
-                    self._set_progress(
-                        overall_ratio,
-                        f"翻訳中: {idx}件完了（全{total_targets}件）",
-                    )
-                    self._set_detail_progress(1.0, f"{modid}: 既存訳を使用")
-                    continue
-
-                try:
-                    result = translate_localizations(
-                        api_key=api_key,
-                        model=model,
-                        in_path=in_path,
-                        out_path=out_path,
-                        existing_translations=existing_ja,
-                        log=self._append_log,
-                        progress=_progress_wrapper,
-                        should_stop=self.stop_event.is_set,
-                        resume_path=resume_path,
-                    )
-                    total_entries += result.total
-                    translated_entries += result.created
-                    total_prompt_tokens += result.prompt_tokens
-                    total_completion_tokens += result.completion_tokens
-                    total_token_count += result.total_tokens
-                    for usage in result.usages:
-                        prompt = usage.prompt_tokens
-                        completion = usage.completion_tokens
-                        total_tok = usage.total_tokens or (prompt + completion)
-                        usage_records.append((prompt, completion, total_tok))
-                    remaining = max(0, result.total - result.created)
-                    if result.stopped:
-                        if remaining:
-                            self._append_log(
-                                f"[INFO] 未翻訳 {remaining} 件の進捗を保存しました。再開時は自動的に続きから処理します。"
-                            )
-                        elif resume_exists:
-                            self._append_log(
-                                "[INFO] 停止時点の翻訳は保存済みです。再開時に利用されます。"
-                            )
-                        self._append_log("[INFO] ユーザーによって翻訳が停止されました。")
-                        aborted = True
-                        break
-                    if out_path.exists():
-                        produced.append((modid, out_path))
-                    self._append_log(f"[OK] ja_jp.json を作成しました（{modid}）。")
-                    pack_dir = self.pack_builder.build(output_dir, produced)
-                    if pack_dir:
-                        pack_dir_path = pack_dir
-                        pack_generated_once = True
-                        self._append_log(f"[OK] リソースパックを更新しました（{modid}）。")
-                        _register_pack_contents(pack_dir)
-                    if not aborted:
-                        overall_ratio = idx / total_targets if total_targets else 1.0
-                        self._set_progress(
-                            overall_ratio,
-                            f"翻訳中: {idx}件完了（全{total_targets}件）",
-                        )
-                except Exception as ex:
-                    had_error = True
-                    self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
-                    self._append_log(traceback.format_exc())
-                    aborted = True
-                    break
+            return run_translation_jobs(
+                targets,
+                api_key=api_key,
+                model=model,
+                output_dir=output_dir,
+                build_pack=lambda produced: self.pack_builder.build(output_dir, produced),
+                log=self._append_log,
+                set_overall=self._set_progress,
+                set_detail=self._set_detail_progress,
+                should_stop=self.stop_event.is_set,
+            )
         finally:
             self.stop_event.clear()
             self.btn_stop.disabled = True
             self.btn_stop.update()
-        if produced and not aborted and not pack_generated_once:
-            try:
-                pack_dir = self.pack_builder.build(output_dir, produced)
-                if pack_dir:
-                    pack_dir_path = pack_dir
-                    self._append_log(f"[OK] リソースパックを更新しました（{pack_dir.name}）。")
-                    pack_png = pack_dir / "pack.png"
-                    if not pack_png.exists():
-                        self._append_log(f"[INFO] pack.png は手動で配置してください（{pack_dir.name}）。")
-                    _register_pack_contents(pack_dir)
-            except Exception as ex:
-                had_error = True
-                self._append_log(f"[ERROR] リソースパックの生成に失敗しました: {repr(ex)}")
-                self._append_log(traceback.format_exc())
-        elif aborted:
-            self._append_log("[WARN] 翻訳が完了しなかったため、リソースパックの作成をスキップしました。")
-        elif skipped_existing:
-            self._append_log(
-                f"[INFO] {skipped_existing} 件の Mod は mods_ja_resource に既存の翻訳があったため処理をスキップしました。"
-            )
-        else:
-            self._append_log("[WARN] ja_jp.json が生成されなかったため、リソースパックの作成をスキップしました。")
-        return TranslationSummary(
-            translated_mods=len(produced),
-            total_mods=total_targets,
-            translated_entries=translated_entries,
-            total_entries=total_entries,
-            aborted=aborted,
-            had_error=had_error,
-            pack_dir=pack_dir_path,
-            prompt_tokens=total_prompt_tokens,
-            completion_tokens=total_completion_tokens,
-            total_tokens=total_token_count,
-            model=model,
-            usage_records=usage_records,
-        )
 
     def on_stop(self, e: ft.ControlEvent):
         self.stop_event.set()
