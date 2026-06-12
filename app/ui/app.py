@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import base64
 import json
-import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -12,13 +8,18 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from xml.sax import saxutils
 
 import flet as ft
 
 
 from ..core.usage import UsageStats
-from ..services import ExtractionResult, extract_localizations, translate_localizations
+from ..services import (
+    ExtractionResult,
+    ResourcePackBuilder,
+    collect_pack_translations,
+    extract_localizations,
+    translate_localizations,
+)
 
 APP_NAME = "MCModLocalizer"
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -275,6 +276,11 @@ class LocalizeApp:
                 ft.Tab(text="設定", icon=ft.Icons.SETTINGS, content=settings_tab),
             ],
             expand=True,
+        )
+        self.pack_builder = ResourcePackBuilder(
+            template_dir=RESOURCE_TEMPLATE_DIR,
+            icon_path=self._get_bundled_asset_path("icon.png"),
+            log=self._append_log,
         )
         page.add(self.tabs)
         self._append_log("準備完了。Mods フォルダと出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
@@ -898,7 +904,7 @@ class LocalizeApp:
                         targets.append((modid, en_path, existing_ja))
                 if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
-                    summary = self._translate_targets(targets, mods_dir, temp_dir_path, out_dir)
+                    summary = self._translate_targets(targets, out_dir)
                     self._update_token_usage_ui(summary)
                     if summary.aborted:
                         toast_message = "翻訳が停止されました。"
@@ -940,8 +946,6 @@ class LocalizeApp:
     def _translate_targets(
         self,
         targets: list[tuple[str, Path, dict[str, str]]],
-        source_path: Path,
-        temp_dir: Path,
         output_dir: Path,
     ) -> TranslationSummary:
         total_targets = len(targets)
@@ -989,14 +993,14 @@ class LocalizeApp:
         total_completion_tokens = 0
         total_token_count = 0
         usage_records: list[tuple[int, int, int]] = []
-        existing_pack_translations = self._collect_pack_translations(output_dir)
+        existing_pack_translations = collect_pack_translations(output_dir)
         resume_root = output_dir / ".resume"
         skipped_existing = 0
 
         def _register_pack_contents(pack_root: Path | None):
             if not pack_root:
                 return
-            for mod_name, lang_path in self._collect_pack_translations(pack_root).items():
+            for mod_name, lang_path in collect_pack_translations(pack_root).items():
                 existing_pack_translations[mod_name] = lang_path
 
         try:
@@ -1089,7 +1093,7 @@ class LocalizeApp:
                     if out_path.exists():
                         produced.append((modid, out_path))
                     self._append_log(f"[OK] ja_jp.json を作成しました（{modid}）。")
-                    pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
+                    pack_dir = self.pack_builder.build(output_dir, produced)
                     if pack_dir:
                         pack_dir_path = pack_dir
                         pack_generated_once = True
@@ -1113,7 +1117,7 @@ class LocalizeApp:
             self.btn_stop.update()
         if produced and not aborted and not pack_generated_once:
             try:
-                pack_dir = self._generate_resource_pack(source_path, temp_dir, output_dir, produced)
+                pack_dir = self.pack_builder.build(output_dir, produced)
                 if pack_dir:
                     pack_dir_path = pack_dir
                     self._append_log(f"[OK] リソースパックを更新しました（{pack_dir.name}）。")
@@ -1158,103 +1162,6 @@ class LocalizeApp:
 
         base = Path(sys._MEIPASS)
         return base / "assets" / filename
-
-    def _generate_resource_pack(
-        self,
-        source_path: Path,
-        temp_dir: Path,
-        output_dir: Path,
-        produced: list[tuple[str, Path]],
-    ) -> Path | None:
-        if not produced:
-            return None
-        self._append_log("[INFO] リソースパック生成を開始します。")
-        
-        # リソースパック名は「出力先(resourcepacks)の親フォルダ名_localize」とする
-        # 例: .../MyModPack/resourcepacks -> MyModPack_localize
-        try:
-            base_name = output_dir.parent.name
-        except Exception:
-            base_name = "ModPack"
-        
-        if not base_name:
-            base_name = "ModPack"
-
-        pack_name = f"{base_name}_localize"
-        pack_dir = output_dir / pack_name
-        pack_dir.mkdir(parents=True, exist_ok=True)
-        self._apply_template_files(pack_dir)
-        assets_dir = pack_dir / "assets"
-        assets_dir.mkdir(parents=True, exist_ok=True)
-        for modid, ja_path in produced:
-            target_dir = assets_dir / modid / "lang"
-            target_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ja_path, target_dir / "ja_jp.json")
-        self._write_pack_mcmeta(pack_dir, base_name)
-        
-        # アイコンの確認・コピー
-        pack_png = pack_dir / "pack.png"
-        if not pack_png.exists():
-            default_icon = self._get_bundled_asset_path("icon.png")
-            if not default_icon.exists():
-                self._append_log(f"[WARN] icon.png が見つかりません: {default_icon}")
-            if default_icon.exists():
-                try:
-                    shutil.copy2(default_icon, pack_png)
-                except Exception as e:
-                    self._append_log(f"[WARN] アイコンのコピーに失敗しました: {e}")
-            
-        return pack_dir
-
-    def _write_pack_mcmeta(self, pack_dir: Path, mod_name: str):
-        latest_pack_format = 99
-        description = "Generated by MCModLocalizer"
-        pack_meta = {
-            "pack": {
-                "pack_format": latest_pack_format,
-                "supported_formats": {
-                    "edition": "java",
-                    "min_inclusive": 1,
-                    "max_inclusive": latest_pack_format,
-                },
-                "description": description,
-            }
-        }
-        pack_dir.mkdir(parents=True, exist_ok=True)
-        mcmeta_path = pack_dir / "pack.mcmeta"
-        mcmeta_path.write_text(json.dumps(pack_meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def _apply_template_files(self, pack_dir: Path):
-        if not RESOURCE_TEMPLATE_DIR.exists():
-            return
-        for item in RESOURCE_TEMPLATE_DIR.iterdir():
-            if item.name in {"pack.mcmeta", "pack.png"}:
-                continue
-            target = pack_dir / item.name
-            if item.is_dir():
-                shutil.copytree(item, target, dirs_exist_ok=True)
-            elif item.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(item, target)
-
-    def _collect_pack_translations(self, base_dir: Path) -> dict[str, Path]:
-        translations: dict[str, Path] = {}
-        if not base_dir.exists() or not base_dir.is_dir():
-            return translations
-
-        try:
-            for candidate in base_dir.rglob("ja_jp.json"):
-                if not candidate.is_file():
-                    continue
-                parent = candidate.parent
-                if parent.name == "lang" and parent.parent != parent:
-                    translations[parent.parent.name] = candidate
-                else:
-                    translations[parent.name] = candidate
-        except Exception:
-            return translations
-
-        return translations
 
 
 def main(page: ft.Page):
