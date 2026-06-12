@@ -11,6 +11,7 @@ from pathlib import Path
 import flet as ft
 
 
+from ..core.settings import SettingsStore
 from ..core.usage import UsageStats, estimate_cost
 from ..services import (
     ExtractionResult,
@@ -37,16 +38,7 @@ class LocalizeApp:
         self.stop_event = threading.Event()
         self._log_lines: list[str] = []
         self._max_log_lines = 500
-        # 保存キー
-        self.K_MODEL = "openai_model"
-        self.K_DIR_MODS = "dir_mods_root"
-        self.K_DIR_OUTPUT = "dir_output_pack"
-        self.K_LAST_MODS_PATH = "last_mods_dir_path"
-        self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
-        self.K_USAGE_HISTORY = "token_usage_history"
-        self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
-        self.K_USAGE_TOTAL_STATS = "token_usage_total_stats"
-        # API Keys
+        # API Keys (keyring)
         self.K_KEY_GEMINI = "GEMINI_API_KEY"
         # 既定値
         self.model_pricing = {}
@@ -88,20 +80,22 @@ class LocalizeApp:
         self.counter = ft.Text("待機中")
         self.detail_progress = ft.ProgressBar(width=420, value=0)
         self.detail_counter = ft.Text("")
+        # 設定の永続化（client_storage ラッパ）
+        self.settings = SettingsStore(self.page.client_storage, log=self._append_log)
         # -------- 抽出タブ UI --------
         self.mods_dir_path = ft.TextField(
             label="Mods フォルダ（必須）",
             dense=True,
             expand=True,
             read_only=True,
-            value=self._load_value(self.K_LAST_MODS_PATH) or "",
+            value=self.settings.get(SettingsStore.K_LAST_MODS_PATH) or "",
         )
         self.output_dir = ft.TextField(
             label="出力フォルダ（リソースパック保存先）",
             dense=True,
             expand=True,
             read_only=True,
-            value=self._load_value(self.K_LAST_OUTPUT_PATH) or "",
+            value=self.settings.get(SettingsStore.K_LAST_OUTPUT_PATH) or "",
         )
         self.fp_mods = ft.FilePicker(on_result=self._on_pick_mods_dir)
         self.fp_dir = ft.FilePicker(on_result=self._on_pick_dir)
@@ -161,7 +155,7 @@ class LocalizeApp:
             spacing=12,
         )
         # -------- 設定タブ UI --------
-        saved_model = self._load_value(self.K_MODEL) or self.default_model
+        saved_model = self.settings.get(SettingsStore.K_MODEL) or self.default_model
         if saved_model not in self.available_models:
             saved_model = self.default_model
         
@@ -204,13 +198,13 @@ class LocalizeApp:
             spacing=12,
         )
 
-        self.usage_history: list[dict[str, object]] = self._load_usage_history()
-        self.total_usage: UsageStats = self._load_total_stats()
+        self.usage_history: list[dict[str, object]] = self.settings.load_usage_history()
+        self.total_usage: UsageStats = self.settings.load_total_stats(self.usage_history)
         self.token_usage_summary = ft.Text("まだ翻訳の実行履歴がありません。")
         self.token_usage_prompt_text = ft.Text(f"入力トークン: {self.total_usage.prompt_tokens}")
         self.token_usage_completion_text = ft.Text(f"出力トークン: {self.total_usage.completion_tokens}")
         self.token_usage_total_text = ft.Text(f"合計トークン: {self.total_usage.total_tokens}")
-        self.total_cost = self._load_total_cost()
+        self.total_cost = self.settings.load_total_cost()
         self.token_usage_cost_text = ft.Text(f"概算コスト累計: ${self.total_cost:.3f}")
         self.token_usage_updated_text = ft.Text("更新時刻: -")
         history_rows = self._generate_history_rows()
@@ -314,11 +308,11 @@ class LocalizeApp:
     # FilePicker launchers
     # ------------------------------
     def _open_mods_picker(self, e: ft.ControlEvent):
-        init_dir = self._get_initial_directory(self.K_DIR_MODS)
+        init_dir = self._get_initial_directory(SettingsStore.K_DIR_MODS)
         self.fp_mods.get_directory_path(initial_directory=init_dir)
 
     def _open_output_dir_picker(self, e: ft.ControlEvent):
-        init_dir = self._get_initial_directory(self.K_DIR_OUTPUT)
+        init_dir = self._get_initial_directory(SettingsStore.K_DIR_OUTPUT)
         self.fp_dir.get_directory_path(initial_directory=init_dir)
 
     # ------------------------------
@@ -329,8 +323,8 @@ class LocalizeApp:
             selected = Path(e.path)
             self.mods_dir_path.value = str(selected)
             self.mods_dir_path.update()
-            self._save_value(self.K_LAST_MODS_PATH, str(selected))
-            self._remember_dir(self.K_DIR_MODS, selected)
+            self.settings.set(SettingsStore.K_LAST_MODS_PATH, str(selected))
+            self._remember_dir(SettingsStore.K_DIR_MODS, selected)
             self._auto_set_output_dir(selected)
 
     def _on_pick_dir(self, e: ft.FilePickerResultEvent):
@@ -338,18 +332,12 @@ class LocalizeApp:
             selected = Path(e.path)
             self.output_dir.value = str(selected)
             self.output_dir.update()
-            self._save_value(self.K_LAST_OUTPUT_PATH, str(selected))
-            self._remember_dir(self.K_DIR_OUTPUT, selected)
+            self.settings.set(SettingsStore.K_LAST_OUTPUT_PATH, str(selected))
+            self._remember_dir(SettingsStore.K_DIR_OUTPUT, selected)
 
     # ------------------------------
     # Settings
     # ------------------------------
-    def _load_value(self, key: str) -> str | None:
-        return self.page.client_storage.get(key)
-
-    def _save_value(self, key: str, value: str):
-        self.page.client_storage.set(key, value)
-
     def _remember_dir(self, key: str, path: Path | None):
         if not path:
             return
@@ -360,7 +348,7 @@ class LocalizeApp:
             dir_path = dir_path.resolve()
         except Exception:
             dir_path = dir_path.absolute()
-        self._save_value(key, str(dir_path))
+        self.settings.set(key, str(dir_path))
 
     def _auto_set_output_dir(self, source_path: Path):
         try:
@@ -393,14 +381,14 @@ class LocalizeApp:
             candidate_dir = target_root / "resourcepacks"
         self.output_dir.value = str(candidate_dir)
         self.output_dir.update()
-        self._save_value(self.K_LAST_OUTPUT_PATH, str(candidate_dir))
-        self._remember_dir(self.K_DIR_OUTPUT, candidate_dir)
+        self.settings.set(SettingsStore.K_LAST_OUTPUT_PATH, str(candidate_dir))
+        self._remember_dir(SettingsStore.K_DIR_OUTPUT, candidate_dir)
         self._append_log(
             f"[INFO] リソースパックフォルダを自動設定しました: {candidate_dir}"
         )
 
     def _get_initial_directory(self, key: str) -> str | None:
-        stored = self._load_value(key)
+        stored = self.settings.get(key)
         if not stored:
             return None
         p = Path(stored)
@@ -438,111 +426,8 @@ class LocalizeApp:
         value = (self.model_field.value or "").strip()
         if value not in self.available_models:
             return
-        self._save_value(self.K_MODEL, value)
+        self.settings.set(SettingsStore.K_MODEL, value)
         self._append_log(f"[INFO] モデル選択を更新しました: {value}")
-
-    def _load_usage_history(self) -> list[dict[str, object]]:
-        raw = self._load_value(self.K_USAGE_HISTORY)
-        if not raw:
-            return []
-        try:
-            data = json.loads(raw)
-        except Exception:
-            self._append_log("[WARN] トークン使用履歴の読み込みに失敗しました。データを破棄します。")
-            return []
-        if not isinstance(data, list):
-            return []
-        history: list[dict[str, object]] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            ts = str(item.get("timestamp", ""))
-            model = str(item.get("model", ""))
-            prompt = item.get("prompt", 0)
-            completion = item.get("completion", 0)
-            total = item.get("total", 0)
-            cost = item.get("cost", 0.0)
-            try:
-                prompt_i = int(prompt)
-            except Exception:
-                prompt_i = 0
-            try:
-                completion_i = int(completion)
-            except Exception:
-                completion_i = 0
-            try:
-                total_i = int(total) if total else prompt_i + completion_i
-            except Exception:
-                total_i = prompt_i + completion_i
-            try:
-                cost_f = float(cost)
-            except Exception:
-                cost_f = 0.0
-            history.append(
-                {
-                    "timestamp": ts,
-                    "model": model,
-                    "prompt": prompt_i,
-                    "completion": completion_i,
-                    "total": total_i,
-                    "cost": cost_f,
-                }
-            )
-        return history
-
-    def _load_total_cost(self) -> float:
-        raw = self._load_value(self.K_USAGE_TOTAL_COST)
-        if not raw:
-            return 0.0
-        try:
-            return float(raw)
-        except Exception:
-            return 0.0
-
-    def _load_total_stats(self) -> UsageStats:
-        raw = self._load_value(self.K_USAGE_TOTAL_STATS)
-        if raw:
-            try:
-                data = json.loads(raw)
-                return UsageStats(
-                    prompt_tokens=int(data.get("prompt_tokens", 0)),
-                    completion_tokens=int(data.get("completion_tokens", 0)),
-                    total_tokens=int(data.get("total_tokens", 0)),
-                )
-            except Exception:
-                pass
-        
-        # Fallback: calculate from history if no saved stats found
-        stats = UsageStats()
-        for record in self.usage_history:
-            stats.prompt_tokens += int(record.get("prompt", 0))
-            stats.completion_tokens += int(record.get("completion", 0))
-            stats.total_tokens += int(record.get("total", 0))
-        return stats
-
-    def _persist_usage_history(self) -> None:
-        try:
-            payload = json.dumps(self.usage_history, ensure_ascii=False)
-            self._save_value(self.K_USAGE_HISTORY, payload)
-        except Exception as ex:
-            self._append_log(f"[WARN] トークン使用履歴の保存に失敗しました: {repr(ex)}")
-
-    def _persist_total_cost(self) -> None:
-        try:
-            self._save_value(self.K_USAGE_TOTAL_COST, f"{self.total_cost:.6f}")
-        except Exception as ex:
-            self._append_log(f"[WARN] トークン累計コストの保存に失敗しました: {repr(ex)}")
-
-    def _persist_total_stats(self) -> None:
-        try:
-            data = {
-                "prompt_tokens": self.total_usage.prompt_tokens,
-                "completion_tokens": self.total_usage.completion_tokens,
-                "total_tokens": self.total_usage.total_tokens,
-            }
-            self._save_value(self.K_USAGE_TOTAL_STATS, json.dumps(data))
-        except Exception as ex:
-            self._append_log(f"[WARN] トークン累計使用量の保存に失敗しました: {repr(ex)}")
 
     def _generate_history_rows(self) -> list[ft.DataRow]:
         grouped: dict[tuple[str, str], dict] = {}
@@ -662,7 +547,7 @@ class LocalizeApp:
             
             # Client Storage クリア
             try:
-                self.page.client_storage.clear()
+                self.settings.clear()
                 self._append_log("[INFO] アプリ設定(client_storage)をクリアしました。")
             except Exception as ex:
                 self._append_log(f"[ERROR] 設定クリア失敗: {ex}")
@@ -762,14 +647,14 @@ class LocalizeApp:
             # keep latest 200 entries to avoid unbounded growth
             if len(self.usage_history) > 200:
                 self.usage_history = self.usage_history[-200:]
-            self._persist_usage_history()
-            self._persist_total_cost()
+            self.settings.save_usage_history(self.usage_history)
+            self.settings.save_total_cost(self.total_cost)
 
             # Update total usage stats
             self.total_usage.prompt_tokens += summary.prompt_tokens
             self.total_usage.completion_tokens += summary.completion_tokens
             self.total_usage.total_tokens += summary.total_tokens
-            self._persist_total_stats()
+            self.settings.save_total_stats(self.total_usage)
 
         if summary.total_tokens > 0:
             calls = len(summary.usage_records)
@@ -838,10 +723,10 @@ class LocalizeApp:
             except Exception as ex:
                 self._append_log(f"[ERROR] 出力フォルダを作成できません: {repr(ex)}")
                 return
-        self._remember_dir(self.K_DIR_MODS, mods_dir)
-        self._remember_dir(self.K_DIR_OUTPUT, out_dir)
-        self._save_value(self.K_LAST_MODS_PATH, str(mods_dir))
-        self._save_value(self.K_LAST_OUTPUT_PATH, str(out_dir))
+        self._remember_dir(SettingsStore.K_DIR_MODS, mods_dir)
+        self._remember_dir(SettingsStore.K_DIR_OUTPUT, out_dir)
+        self.settings.set(SettingsStore.K_LAST_MODS_PATH, str(mods_dir))
+        self.settings.set(SettingsStore.K_LAST_OUTPUT_PATH, str(out_dir))
         self.btn_extract.disabled = True
         self.progress_panel.visible = True
         self.btn_extract.update()
@@ -917,7 +802,7 @@ class LocalizeApp:
         targets: list[tuple[str, Path, dict[str, str]]],
         output_dir: Path,
     ) -> TranslationSummary:
-        model = self.model_field.value or self._load_value(self.K_MODEL) or self.default_model
+        model = self.model_field.value or self.settings.get(SettingsStore.K_MODEL) or self.default_model
         model = model.strip()
         if model not in self.available_models:
             model = self.available_models[0]
