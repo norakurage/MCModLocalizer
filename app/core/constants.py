@@ -18,7 +18,6 @@ PROTECT_RE = re.compile("|".join(PLACEHOLDER_PATTERNS + COLOR_CODES + ESCAPES))
 
 SYSTEM_INSTRUCTIONS_BASE = """あなたは熟練のローカライザーです。出力は必ず日本語で、自然で簡潔に訳してください。
 Minecraft の Mod 用テキスト（ゲーム内のUI/メッセージ/アイテム名）です。次を厳守：
-Minecraft の Mod 用テキスト（ゲーム内のUI/メッセージ/アイテム名）です。次を厳守：
 - ‹T0› のような保護トークンは絶対に改変・和訳しない（位置もできるだけ原文通り）
 - 句読点・全角/半角の不自然さを避ける。文末の余分な空白を付けない
 - 固有名詞/アイテムID/コマンドは文脈上そのまま残す（例: “Minecraft”, “Redstone”, “/reload”）

@@ -60,10 +60,7 @@ class LocalizeApp:
         self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
         self.K_USAGE_HISTORY = "token_usage_history"
         self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
-        self.K_USAGE_HISTORY = "token_usage_history"
-        self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
         self.K_USAGE_TOTAL_STATS = "token_usage_total_stats"
-        # API Keys
         # API Keys
         self.K_KEY_GEMINI = "GEMINI_API_KEY"
         # 既定値
@@ -167,7 +164,6 @@ class LocalizeApp:
                     alignment=ft.MainAxisAlignment.START,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                self.progress_panel,
                 self.progress_panel,
                 ft.Row(
                     [ft.Text("ログ"), ft.Container(expand=True), self.chk_auto_scroll, self.btn_copy_log],
@@ -288,10 +284,8 @@ class LocalizeApp:
 
     def _load_model_pricing(self):
         defaults = {
-            "gemini-2.0-flash-exp": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
-            "gemini-1.5-flash": {"input": 0.075, "cached_input": 0.01875, "output": 0.30},
-            "gemini-1.5-pro": {"input": 1.25, "cached_input": 0.3125, "output": 5.00},
-            "gemini-1.5-flash-8b": {"input": 0.0375, "cached_input": 0.01, "output": 0.15},
+            "gemini-2.5-flash": {"input": 0.30, "cached_input": 0.03, "output": 2.50},
+            "gemini-2.5-flash-lite": {"input": 0.10, "cached_input": 0.01, "output": 0.40},
         }
         try:
             path = self._get_bundled_asset_path("pricing.json")
@@ -601,6 +595,14 @@ class LocalizeApp:
         self.token_usage_history_table.rows = self._generate_history_rows()
         self.token_usage_history_table.update()
 
+    def _open_dialog(self, dlg: ft.AlertDialog) -> None:
+        if hasattr(self.page, "open"):
+            self.page.open(dlg)
+        else:
+            self.page.dialog = dlg
+            dlg.open = True
+            self.page.update()
+
     def _open_api_key_dialog(self, e=None):
         try:
 
@@ -651,13 +653,8 @@ class LocalizeApp:
                 actions_alignment=ft.MainAxisAlignment.END,
             )
             
-            if hasattr(self.page, "open"):
-                self.page.open(dlg)
-            else:
-                self.page.dialog = dlg
-                dlg.open = True
-                self.page.update()
-                
+            self._open_dialog(dlg)
+
         except Exception as ex:
             self._append_log(f"[ERROR] ダイアログの表示に失敗しました: {repr(ex)}")
             import traceback
@@ -697,12 +694,7 @@ class LocalizeApp:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        if hasattr(self.page, "open"):
-            self.page.open(dlg)
-        else:
-            self.page.dialog = dlg
-            dlg.open = True
-            self.page.update()
+        self._open_dialog(dlg)
 
     # ------------------------------
     # Log & Progress
@@ -1196,7 +1188,6 @@ class LocalizeApp:
         assets_dir.mkdir(parents=True, exist_ok=True)
         for modid, ja_path in produced:
             target_dir = assets_dir / modid / "lang"
-            target_dir.mkdir(parents=True, exist_ok=True)
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ja_path, target_dir / "ja_jp.json")
         self._write_pack_mcmeta(pack_dir, base_name)
