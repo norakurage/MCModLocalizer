@@ -2,7 +2,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
+
+
+def estimate_cost(
+    pricing: Optional[Dict[str, float]],
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float:
+    """料金表(1M トークンあたりの USD)から概算コストを返す。pricing が無ければ 0。"""
+    if not pricing:
+        return 0.0
+    cost = pricing.get("input", 0.0) * prompt_tokens / 1_000_000
+    cost += pricing.get("output", 0.0) * completion_tokens / 1_000_000
+    return cost
 
 
 @dataclass
@@ -67,4 +80,4 @@ def usage_from_response(resp) -> UsageStats:  # type: ignore[no-untyped-def]
     return UsageStats(prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
 
 
-__all__ = ["UsageStats", "usage_from_response"]
+__all__ = ["UsageStats", "estimate_cost", "usage_from_response"]

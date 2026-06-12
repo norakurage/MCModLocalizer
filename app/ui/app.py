@@ -12,7 +12,7 @@ from pathlib import Path
 import flet as ft
 
 
-from ..core.usage import UsageStats
+from ..core.usage import UsageStats, estimate_cost
 from ..services import (
     ExtractionResult,
     ResourcePackBuilder,
@@ -772,14 +772,9 @@ class LocalizeApp:
 
     def _update_token_usage_ui(self, summary: TranslationSummary):
         pricing = self.model_pricing.get(summary.model)
-        last_cost_total = 0.0
         if summary.usage_records:
             for prompt, completion, total in summary.usage_records:
-                cost = 0.0
-                if pricing:
-                    cost += pricing["input"] * prompt / 1_000_000
-                    cost += pricing["output"] * completion / 1_000_000
-                last_cost_total += cost
+                cost = estimate_cost(pricing, prompt, completion)
                 self.total_cost += cost
                 record = {
                     "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
