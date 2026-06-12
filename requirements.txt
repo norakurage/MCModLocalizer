@@ -1,5 +1,8 @@
-flet>=0.28.3
-flet-desktop>=0.28.3
+# Flet は 0.28.x の API（ft.border.all / ft.app など）に依存しているため固定する。
+# 上限を外すと CI が最新版(0.80+ の breaking change)を取り込み、配布ビルドが
+# 起動時に AttributeError 等で失敗する。flet と flet-desktop はバージョン一致が必須。
+flet==0.28.3
+flet-desktop==0.28.3
 keyring>=24.3.0
 pyinstaller
 Pillow
