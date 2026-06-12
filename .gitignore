@@ -1,7 +1,6 @@
 __pycache__/
 dist/
 build/
-*.spec
 .venv/
 .venv-build/
 .ico

@@ -1,0 +1,83 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: macos-latest
+            platform: macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller MCModLocalizer.spec
+
+      - name: Rename Windows exe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Rename-Item dist/MCModLocalizer.exe MCModLocalizer-windows.exe
+
+      - name: Zip macOS app bundle
+        if: runner.os == 'macOS'
+        run: cd dist && zip -r MCModLocalizer-macos.zip MCModLocalizer.app
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: dist/MCModLocalizer-windows.exe
+
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: dist/MCModLocalizer-macos.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: ./release
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-build
+          path: ./release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/MCModLocalizer-windows.exe
+            release/MCModLocalizer-macos.zip
+          generate_release_notes: true
