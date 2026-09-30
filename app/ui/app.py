@@ -46,7 +46,7 @@ class LocalizeApp:
         self.pricing_version = "-"
         self._load_model_pricing()
         # Default model
-        self.default_model = "gemini-2.5-flash-lite"
+        self.default_model = "gemini-3.1-flash-lite"
         # -------------- UI 構築 --------------
         page.title = f"{APP_NAME} (Flet)"
         page.padding = 16
@@ -268,8 +268,8 @@ class LocalizeApp:
 
     def _load_model_pricing(self):
         defaults = {
-            "gemini-2.5-flash": {"input": 0.30, "cached_input": 0.03, "output": 2.50},
-            "gemini-2.5-flash-lite": {"input": 0.10, "cached_input": 0.01, "output": 0.40},
+            "gemini-3.1-flash-lite": {"input": 0.25, "cached_input": 0.025, "output": 1.50},
+            "gemini-3.5-flash-lite": {"input": 0.30, "cached_input": 0.03, "output": 2.50},
         }
         try:
             path = self._get_bundled_asset_path("pricing.json")

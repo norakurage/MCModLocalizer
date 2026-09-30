@@ -135,7 +135,22 @@ def translate_batch(
                 # リトライ上限到達時はそのまま送出する。
                 retryable = e.code in (429, 500, 502, 503)
                 if not retryable or attempt == max_retries - 1:
-                    print(f"--- [ERROR] HTTP {e.code}: {e.reason}")
+                    response_detail = ""
+                    try:
+                        response_detail = e.read().decode("utf-8", errors="replace").strip()
+                    except Exception:
+                        pass
+                    message = f"[ERROR] HTTP {e.code}: {e.reason}"
+                    if e.code == 404:
+                        message += (
+                            f"。モデル '{model}' が見つからないか、このAPIキーのプロジェクトでは"
+                            "利用できない可能性があります。設定から別のモデルを選択してください。"
+                        )
+                    if response_detail:
+                        message += f"\n[API] {response_detail[:1000]}"
+                    print(f"--- {message}")
+                    if log_fn:
+                        log_fn(message)
                     raise
                 msg = f"[WARN] HTTP {e.code} ({e.reason}). Waiting {retry_delay:.2f}s... (Attempt {attempt+1}/{max_retries})"
                 print(f"--- {msg}")

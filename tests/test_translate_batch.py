@@ -1,7 +1,7 @@
 """Regression tests for translate_batch HTTP/parse/retry behaviour.
 
 urllib is faked so no network is touched. These lock the retry policy:
-429/5xx -> retry with backoff, 400/401/403 -> immediate raise.
+429/5xx -> retry with backoff, 400/401/403/404 -> immediate raise.
 """
 from __future__ import annotations
 
@@ -63,6 +63,17 @@ class TranslateBatchTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):
                 tb.translate_batch("key", items, model="m", system_instructions="sys")
         self.assertEqual(urlopen.call_count, 1)
+
+    def test_404_logs_model_guidance(self):
+        items = [{"key": "k1", "value": "v1"}]
+        logs = []
+        with mock.patch("urllib.request.urlopen", side_effect=_http_error(404)):
+            with self.assertRaises(urllib.error.HTTPError):
+                tb.translate_batch(
+                    "key", items, model="missing-model",
+                    system_instructions="sys", log_fn=logs.append,
+                )
+        self.assertTrue(any("missing-model" in line and "利用できない" in line for line in logs))
 
     def test_empty_items_short_circuits(self):
         with mock.patch("urllib.request.urlopen") as urlopen:
